@@ -1,0 +1,336 @@
+---
+# Provisions a machine, then applies the dotfiles from the separate
+# `dotfiles` repo (github.com/dominhtim/dotfiles) via chezmoi.
+# Safe to re-run: every task is idempotent (Ansible's `changed`/`ok` states
+# handle that natively, no `install.sh`-style manual "does it exist" checks
+# needed for most of this).
+#
+# Run with: ansible-playbook -K ansible/playbook.yml
+# -K prompts for a sudo password. Only actually needed the very first time:
+# the first task below grants this user passwordless sudo permanently, so
+# every task after it in this same run — and every run after this one —
+# needs no password at all. bootstrap.sh detects this automatically and
+# drops -K once it's in place.
+
+- name: Bootstrap dev workstation (packages, zsh, chezmoi-managed dotfiles)
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    # Change these if you fork this repo for someone else, or use a different GitHub account.
+    git_name: "dominhtim"
+    git_email: "dominhtim@gmail.com"
+    dotfiles_repo: "dominhtim/dotfiles"
+    chezmoi_arch: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+    projects_dir: "{{ ansible_facts['env']['HOME'] }}/projects"
+    # Add/remove repos here — cloned once into ~/projects, never touched again
+    # after that (these are your working repos, not something to auto-sync).
+    project_repos:
+      - git@github.com:dominhtim/TestProject.git
+      - git@github.com:dominhtim/discord-bot.git
+
+  tasks:
+    - name: Ensure /etc/sudoers.d exists
+      ansible.builtin.file:
+        path: /etc/sudoers.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      become: true
+
+    # This is the one task in the whole playbook that a fresh machine can't
+    # get around needing a real, working sudo credential for — nothing can
+    # grant itself root from nothing. Everything after it, though, runs
+    # passwordless, in this run and every run after.
+    - name: Grant this user passwordless sudo (one-time; every task after this is then passwordless)
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ ansible_facts['user_id'] }}-nopasswd"
+        content: "{{ ansible_facts['user_id'] }} ALL=(ALL) NOPASSWD: ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+      become: true
+
+    - name: Install base packages
+      ansible.builtin.package:
+        name:
+          - git
+          - zsh
+          - curl
+          - tmux
+          - neovim
+          - fzf
+          - ripgrep
+          - unzip
+          - xclip
+          - openssh-client
+          - nodejs
+          - npm
+          - build-essential
+          - docker.io
+          - docker-compose-v2
+          - gh
+        state: present
+      become: true
+
+    - name: Add this user to the docker group (lets you run docker without sudo)
+      ansible.builtin.user:
+        name: "{{ ansible_facts['user_id'] }}"
+        groups: docker
+        append: true
+      become: true
+
+    - name: Ensure the docker service is enabled and running
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+      become: true
+
+    # --- SSH key for GitHub, done early on purpose -----------------------
+    # This used to happen right before the dotfiles clone, which meant you
+    # only found out you needed to add a key to GitHub after everything
+    # else had already finished — a hard failure, right at the end, with
+    # no way to continue the same run. Doing it here instead means you get
+    # the key to paste in within the first few seconds, with the slower
+    # steps below (oh-my-zsh, plugin clones, downloading chezmoi) running
+    # while you go add it. There's still a checkpoint right before the
+    # actual clone (search for "Pause" below) in case you need more time
+    # than that.
+    #
+    # No token or password is ever stored anywhere in this repo. The
+    # private key is generated on the machine and never leaves it; the
+    # only thing that needs to go anywhere is the public key, which isn't
+    # secret by definition. Adding it to your GitHub account is the one
+    # step that genuinely can't be automated — GitHub requires that to
+    # happen through an authenticated browser session as a deliberate
+    # security boundary, not a gap in this playbook.
+    - name: Ensure ~/.ssh exists
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.ssh"
+        state: directory
+        mode: "0700"
+
+    - name: Check for an existing SSH key
+      ansible.builtin.stat:
+        path: "{{ ansible_facts['env']['HOME'] }}/.ssh/id_ed25519"
+      register: ssh_key
+
+    - name: Generate an SSH key for GitHub (ed25519, no passphrase — protected by this machine's disk like any other local key)
+      ansible.builtin.command: >
+        ssh-keygen -t ed25519 -f {{ ansible_facts['env']['HOME'] }}/.ssh/id_ed25519
+        -N "" -C "{{ ansible_facts['user_id'] }}@{{ ansible_facts['hostname'] }}"
+      when: not ssh_key.stat.exists
+      changed_when: true
+
+    - name: Fetch GitHub's SSH host key
+      ansible.builtin.command: ssh-keyscan -t ed25519 github.com
+      register: github_hostkey
+      changed_when: false
+      failed_when: false
+      retries: 3
+      delay: 2
+      until: github_hostkey.rc == 0 and github_hostkey.stdout | length > 0
+
+    - name: Add GitHub's host key to known_hosts (avoids an interactive "authenticity of host" prompt on first connect)
+      ansible.builtin.known_hosts:
+        name: github.com
+        key: "{{ github_hostkey.stdout }}"
+        path: "{{ ansible_facts['env']['HOME'] }}/.ssh/known_hosts"
+      when: github_hostkey.rc == 0 and github_hostkey.stdout | length > 0
+
+    - name: Read the public key so it can be displayed
+      ansible.builtin.slurp:
+        src: "{{ ansible_facts['env']['HOME'] }}/.ssh/id_ed25519.pub"
+      register: github_pubkey
+
+    - name: Print the SSH public key now, right at the start, so there's time to add it before it's actually needed
+      ansible.builtin.debug:
+        msg:
+          - "SSH key ready. Add it to GitHub now if you haven't already (github.com/settings/keys -> New SSH key):"
+          - "{{ github_pubkey.content | b64decode }}"
+          - "The rest of the setup runs while you do that — there's a checkpoint before the dotfiles clone if you need more time."
+
+    - name: Check whether oh-my-zsh is already installed
+      ansible.builtin.stat:
+        path: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh"
+      register: omz_dir
+
+    - name: Clone oh-my-zsh
+      ansible.builtin.git:
+        repo: https://github.com/ohmyzsh/ohmyzsh.git
+        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh"
+        version: master   # intentionally tracks upstream tip, not pinned — this is a rolling theme/plugin install
+        depth: 1
+      when: not omz_dir.stat.exists
+
+    - name: Clone/update powerlevel10k theme
+      ansible.builtin.git:
+        repo: https://github.com/romkatv/powerlevel10k.git
+        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/themes/powerlevel10k"
+        version: master
+        depth: 1
+        update: true
+
+    - name: Clone/update zsh-autosuggestions plugin
+      ansible.builtin.git:
+        repo: https://github.com/zsh-users/zsh-autosuggestions.git
+        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/plugins/zsh-autosuggestions"
+        version: master
+        depth: 1
+        update: true
+
+    - name: Clone/update zsh-syntax-highlighting plugin
+      ansible.builtin.git:
+        repo: https://github.com/zsh-users/zsh-syntax-highlighting.git
+        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting"
+        version: master
+        depth: 1
+        update: true
+
+    - name: Set zsh as the default shell
+      ansible.builtin.user:
+        name: "{{ ansible_facts['user_id'] }}"
+        shell: /usr/bin/zsh
+      become: true
+
+    - name: Check whether chezmoi is already installed
+      ansible.builtin.command: command -v chezmoi
+      register: chezmoi_check
+      failed_when: false
+      changed_when: false
+
+    - name: Ensure ~/.local/bin exists
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/bin"
+        state: directory
+        mode: "0755"
+
+    - name: Install chezmoi (downloads the plain binary straight from the GitHub release, no curl|sh installer script)
+      ansible.builtin.get_url:
+        url: "https://github.com/twpayne/chezmoi/releases/latest/download/chezmoi-linux-{{ chezmoi_arch }}"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi"
+        mode: "0755"
+      when: chezmoi_check.rc != 0
+
+    - name: Ensure ~/.config/chezmoi exists
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.config/chezmoi"
+        state: directory
+        mode: "0700"
+
+    # Pre-seeding chezmoi's own config with the identity data means `chezmoi
+    # init` below never has to prompt interactively — which matters because
+    # Ansible tasks don't have a real TTY to prompt through anyway.
+    - name: Seed chezmoi's config with git identity (so its own init prompt is skipped)
+      ansible.builtin.template:
+        src: chezmoi.toml.j2
+        dest: "{{ ansible_facts['env']['HOME'] }}/.config/chezmoi/chezmoi.toml"
+        mode: "0600"
+
+    - name: Check whether the dotfiles repo has already been cloned by chezmoi
+      ansible.builtin.stat:
+        # Checking for .git specifically, not just the parent directory —
+        # a clone that failed partway through (e.g. an auth prompt on a
+        # private repo) can still leave the parent directory behind without
+        # a real git checkout inside it.
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi/.git"
+      register: chezmoi_git_before
+
+    - name: Check whether a stale/incomplete chezmoi source directory exists
+      ansible.builtin.stat:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi"
+      register: chezmoi_src_dir
+
+    - name: Remove incomplete chezmoi source directory left by a previously-failed clone
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi"
+        state: absent
+      when: chezmoi_src_dir.stat.exists and not chezmoi_git_before.stat.exists
+
+    - name: Check the existing source repo's remote URL, if a valid clone exists
+      ansible.builtin.command: "git -C {{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi remote get-url origin"  # noqa: command-instead-of-module
+      register: chezmoi_remote
+      changed_when: false
+      failed_when: false
+      when: chezmoi_git_before.stat.exists
+
+    - name: Remove the source directory if it's still using the old HTTPS remote (predates switching to SSH)
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi"
+        state: absent
+      when: chezmoi_git_before.stat.exists and chezmoi_remote.stdout is defined and chezmoi_remote.stdout.startswith('https://')
+
+    # Re-checked after the self-healing above, rather than reusing
+    # chezmoi_git_before — that fact would be stale (still say "exists")
+    # even immediately after a task just deleted the directory.
+    - name: Re-check whether a valid clone still exists after any self-healing above
+      ansible.builtin.stat:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi/.git"
+      register: chezmoi_git
+
+    # Only fires when a clone is actually about to happen (fresh machine,
+    # a previously broken clone, or one just cleared for using the wrong
+    # remote above) — once the dotfiles are cloned successfully, this and
+    # everything above it about SSH is skipped on every future run.
+    - name: Pause here if the SSH key might not be added to GitHub yet
+      ansible.builtin.pause:
+        prompt: >-
+          About to clone the dotfiles repo over SSH. If you haven't added the
+          key printed near the start of this run to GitHub yet
+          (github.com/settings/keys), do that now. Press Enter once it's
+          done to continue
+      when: not chezmoi_git.stat.exists
+
+    - name: Clone the dotfiles repo over SSH (first run only — chezmoi init doesn't pull on repeat runs)
+      ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi init --ssh {{ dotfiles_repo }}"
+      when: not chezmoi_git.stat.exists
+      changed_when: true
+
+    - name: Pull latest dotfiles and apply (chezmoi update does both, safe to run every time)
+      ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi update"
+      register: chezmoi_update
+      changed_when: "'Already up to date' not in chezmoi_update.stdout"
+
+    # Placed after the dotfiles clone on purpose: a successful SSH clone
+    # above already proves the SSH key is registered with GitHub, so
+    # there's no need to repeat the pause/reminder checkpoint here too.
+    - name: Ensure ~/projects exists
+      ansible.builtin.file:
+        path: "{{ projects_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Clone project repos (first run only — these are your working repos, left alone after that, not auto-synced)
+      ansible.builtin.git:  # noqa: latest[git] — these are active dev repos, pinning to a frozen commit would be wrong here, not safer
+        repo: "{{ item }}"
+        dest: "{{ projects_dir }}/{{ item | basename | regex_replace('\\.git$', '') }}"
+        version: HEAD
+        update: false
+      loop: "{{ project_repos }}"
+
+    - name: Ensure ~/.zshrc.local exists (untracked, machine-only escape hatch)
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.zshrc.local"
+        state: touch
+        mode: "0644"
+        access_time: preserve
+        modification_time: preserve
+
+- name: Post-run summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Print next steps
+      ansible.builtin.debug:
+        msg:
+          - "Done."
+          - "Next steps:"
+          - "  1. Run 'exec zsh' to reload the shell (or log out/in for the shell change to fully take)"
+          - "  2. Run 'p10k configure' to set up the prompt"
+          - "  3. Open nvim once to let lazy.nvim install all plugins automatically"
+          - "  4. To edit a dotfile going forward: 'chezmoi edit ~/.zshrc' then 'chezmoi apply'"

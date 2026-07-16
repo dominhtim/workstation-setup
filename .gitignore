@@ -1,0 +1,6 @@
+.DS_Store
+*.retry
+# Defensive: Ansible occasionally creates a literal ~username/ directory
+# here if HOME/USER end up mismatched in an unusual environment. Never
+# meant to be committed.
+ansible/~*
