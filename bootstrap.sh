@@ -16,10 +16,29 @@ VENV_DIR="$HOME/.workstation-setup-venv"
 # Until upstream fixes it, this pins to a known-good version in its own
 # venv instead of trusting whatever a distro package manager ships.
 ANSIBLE_VERSION="2.17.*"
+# The glob's fixed prefix (e.g. "2.17." from "2.17.*") — used to check an
+# already-installed version against the pin below.
+ANSIBLE_VERSION_PREFIX="${ANSIBLE_VERSION%\**}"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 
-if [ ! -x "$VENV_DIR/bin/ansible-playbook" ]; then
+installed_ansible_version() {
+  "$VENV_DIR/bin/pip" show ansible-core 2>/dev/null | awk '/^Version:/{print $2}'
+}
+
+needs_install=1
+if [ -x "$VENV_DIR/bin/ansible-playbook" ]; then
+  installed_version="$(installed_ansible_version)"
+  case "$installed_version" in
+    "${ANSIBLE_VERSION_PREFIX}"*) needs_install=0 ;;
+    *)
+      log "Venv has ansible-core ${installed_version:-<unknown>}, but this script now pins ${ANSIBLE_VERSION} — recreating the venv..."
+      rm -rf "$VENV_DIR"
+      ;;
+  esac
+fi
+
+if [ "$needs_install" -eq 1 ]; then
   log "Setting up Ansible (pinned to ${ANSIBLE_VERSION} — see comment in this script for why)..."
   if ! python3 -m venv "$VENV_DIR" >/dev/null 2>&1; then
     # Debian/Ubuntu splits venv support into a separate package; a bare

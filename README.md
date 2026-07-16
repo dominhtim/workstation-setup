@@ -29,8 +29,9 @@ legitimate way to sync a machine, not just a first-time setup step.
 
 ## What it does (`ansible/playbook.yml`)
 
-1. Installs base packages (git, zsh, tmux, neovim, fzf, ripgrep, xclip,
-   openssh-client, nodejs, npm, build-essential, docker.io, docker-compose-v2)
+1. Installs base packages (git, zsh, curl, tmux, neovim, fzf, ripgrep, unzip,
+   xclip, openssh-client, nodejs, npm, build-essential, docker.io,
+   docker-compose-v2, gh)
 2. Adds you to the `docker` group and enables/starts the docker service
 3. Generates an SSH key for GitHub if you don't already have one, and
    prints the public key immediately — right after packages, before the
@@ -112,8 +113,9 @@ and hangs against 2.20. The bug is specific to recent `ansible-core`'s own
 connection/become handling, not sudo, PAM, or Python.
 
 If a future `ansible-core` release fixes this, bump `ANSIBLE_VERSION` near
-the top of `bootstrap.sh` and delete `~/.workstation-setup-venv` to force
-a clean reinstall.
+the top of `bootstrap.sh` — the script checks the venv's installed version
+against it on every run and recreates `~/.workstation-setup-venv`
+automatically on a mismatch, so no manual deletion is needed.
 
 ## GitHub SSH access
 
