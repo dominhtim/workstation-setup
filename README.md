@@ -31,7 +31,7 @@ legitimate way to sync a machine, not just a first-time setup step.
 
 1. Installs base packages (git, zsh, curl, tmux, neovim, fzf, ripgrep, unzip,
    xclip, openssh-client, nodejs, npm, build-essential, docker.io,
-   docker-compose-v2, gh)
+   docker-compose-v2, docker-buildx, gh)
 2. Adds you to the `docker` group and enables/starts the docker service
 3. Generates an SSH key for GitHub if you don't already have one, and
    prints the public key immediately — right after packages, before the
@@ -140,10 +140,11 @@ browser session, not a gap in the automation.
 
 ## Docker
 
-Installed via Ubuntu's own `docker.io` + `docker-compose-v2` packages
-(simpler than adding Docker's official third-party apt repo, and current
-enough for personal use — 29.x at time of writing on 24.04). The playbook
-also adds you to the `docker` group and enables/starts the service.
+Installed via Ubuntu's own `docker.io` + `docker-compose-v2` +
+`docker-buildx` packages (simpler than adding Docker's official
+third-party apt repo, and current enough for personal use — 29.x at time
+of writing on 24.04). The playbook also adds you to the `docker` group
+and enables/starts the service.
 
 One thing that can't be automated away: **group membership doesn't apply
 to your already-running shell session** — same as the zsh default-shell
