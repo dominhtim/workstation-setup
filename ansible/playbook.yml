@@ -29,8 +29,67 @@
     project_repos:
       - git@github.com:dominhtim/TestProject.git
       - git@github.com:dominhtim/discord-bot.git
+    # One list, used by both the preflight check and the install task below,
+    # so the two can never drift apart.
+    base_packages:
+      - git
+      - zsh
+      - curl
+      - tmux
+      - neovim
+      - fzf
+      - ripgrep
+      - unzip
+      - xclip
+      - openssh-client
+      - nodejs
+      - npm
+      - build-essential
+      - docker.io
+      - docker-compose-v2
+      - docker-buildx
+      - gh
 
   tasks:
+    # --- Preflight -----------------------------------------------------
+    # Everything here runs before the first task that changes anything, so
+    # a machine this playbook can't finish on is left exactly as it was
+    # rather than half-provisioned. Checks that have to happen even earlier
+    # than Ansible (sudo, a real terminal, the controller's Python version)
+    # live in bootstrap.sh instead — Ansible can't make them, it needs all
+    # three to already hold before its own first task runs.
+
+    # `package` fails as a single unit: one name missing from the archives
+    # takes the whole install task with it, and apt's error doesn't make it
+    # obvious which name was at fault. This repo was built on Ubuntu, where
+    # everything above is in main or universe; Debian doesn't ship `gh` in
+    # its official archive at all, for one. Probing first turns that into a
+    # named list up front instead of a wall of apt output later.
+    - name: "Preflight: probe each base package against the archives"
+      ansible.builtin.command: "apt-cache show {{ item }}"
+      register: pkg_probe
+      changed_when: false
+      failed_when: false
+      loop: "{{ base_packages }}"
+      when: ansible_facts['pkg_mgr'] == 'apt'
+
+    - name: "Preflight: stop if any base package is unavailable"
+      vars:
+        missing_packages: "{{ pkg_probe.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+      ansible.builtin.assert:
+        that: missing_packages | length == 0
+        fail_msg: >-
+          Not in this distro's archives: {{ missing_packages | join(', ') }}.
+          Nothing has been changed on this machine yet. Either add the repo
+          that provides them (`gh` comes from GitHub's own apt repo at
+          cli.github.com on Debian), drop them from `base_packages` at the
+          top of this playbook and install them by hand, or run
+          `sudo apt update` first if you think the package index is just
+          stale.
+        success_msg: "All {{ base_packages | length }} base packages are available."
+      when: ansible_facts['pkg_mgr'] == 'apt'
+    # --- End preflight -------------------------------------------------
+
     - name: Ensure /etc/sudoers.d exists
       ansible.builtin.file:
         path: /etc/sudoers.d
@@ -56,24 +115,7 @@
 
     - name: Install base packages
       ansible.builtin.package:
-        name:
-          - git
-          - zsh
-          - curl
-          - tmux
-          - neovim
-          - fzf
-          - ripgrep
-          - unzip
-          - xclip
-          - openssh-client
-          - nodejs
-          - npm
-          - build-essential
-          - docker.io
-          - docker-compose-v2
-          - docker-buildx
-          - gh
+        name: "{{ base_packages }}"
         state: present
       become: true
 
@@ -84,12 +126,26 @@
         append: true
       become: true
 
+    # Skipped rather than failed where there's no systemd to talk to —
+    # Debian/Ubuntu under WSL without `systemd=true` in /etc/wsl.conf being
+    # the case that actually turns up. Everything else here still applies;
+    # only starting the daemon has to be done by hand.
     - name: Ensure the docker service is enabled and running
       ansible.builtin.systemd:
         name: docker
         enabled: true
         state: started
       become: true
+      when: ansible_facts['service_mgr'] == 'systemd'
+
+    - name: Note that the docker service was left alone (no systemd on this machine)
+      ansible.builtin.debug:
+        msg: >-
+          Init system is '{{ ansible_facts['service_mgr'] }}', not systemd, so
+          docker wasn't enabled or started. Start it yourself
+          ('sudo service docker start'), or under WSL put 'systemd=true' in
+          the [boot] section of /etc/wsl.conf and restart the distro.
+      when: ansible_facts['service_mgr'] != 'systemd'
 
     # --- SSH key for GitHub, done early on purpose -----------------------
     # This used to happen right before the dotfiles clone, which meant you
@@ -331,7 +387,7 @@
         msg:
           - "Done."
           - "Next steps:"
-          - "  1. Run 'exec zsh' to reload the shell (or log out/in for the shell change to fully take)"
+          - "  1. Log out and back in — needed for the docker group to take effect (you'll get 'permission denied' on the docker socket until you do) and for the shell change to fully take. 'exec zsh' reloads the shell alone, but won't pick up the new group."
           - "  2. Run 'p10k configure' to set up the prompt"
           - "  3. Open nvim once to let lazy.nvim install all plugins automatically"
           - "  4. To edit a dotfile going forward: 'chezmoi edit ~/.zshrc' then 'chezmoi apply'"

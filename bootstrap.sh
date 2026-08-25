@@ -25,8 +25,54 @@ ANSIBLE_VERSION="2.21.*"
 # The glob's fixed prefix (e.g. "2.21." from "2.21.*") — used to check an
 # already-installed version against the pin below.
 ANSIBLE_VERSION_PREFIX="${ANSIBLE_VERSION%\**}"
+# ansible-core's own floor for the controller: 2.21 needs >= 3.12 (2.17
+# only needed >= 3.10). Checked in preflight below purely so the failure
+# reads as "your Python is too old for the pin" instead of a wall of pip
+# resolver output. Keep this in step with ANSIBLE_VERSION.
+ANSIBLE_MIN_PYTHON="3.12"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
+die() { printf '\033[1;31m==>\033[0m %s\n' "$1" >&2; exit 1; }
+
+# --- Preflight ---------------------------------------------------------
+# Only the things that must hold before Ansible can run at all live here.
+# Anything about the machine being provisioned belongs in the playbook's
+# own preflight instead — see the top of ansible/playbook.yml.
+
+# visudo (below) and the playbook's `pause` before the dotfiles clone both
+# need a real terminal to talk to. Failing here beats hanging on invisible
+# prompts halfway through a provision.
+if [ ! -t 0 ]; then
+  die "No terminal attached to stdin. Run this script directly in a terminal — not piped, redirected, or backgrounded (it needs to prompt for sudo and, later, for you to add an SSH key to GitHub)."
+fi
+
+# A default Debian install with a root password set installs no sudo at
+# all and leaves your user out of the sudo group. Ansible can't warn about
+# this itself: `become` fails on the playbook's very first task, long after
+# this script has already used sudo.
+if ! command -v sudo >/dev/null 2>&1; then
+  die "sudo isn't installed. As root: 'apt install sudo && usermod -aG sudo $USER' (or the equivalent for your distro), then log out and back in and re-run this."
+fi
+# Deliberately never prompts: every probe here is either -n (fail rather
+# than ask) or a pure group lookup. A check that can block waiting on a
+# password nobody is there to type is the exact failure this repo already
+# spent a debugging session on.
+if sudo -n -v 2>/dev/null; then
+  : # passwordless or already-cached credentials — nothing to warn about
+elif id -nG "$USER" 2>/dev/null | grep -qwE 'sudo|wheel|admin'; then
+  : # can sudo, will be asked for a password further down. Fine.
+else
+  die "This user isn't in a sudo group ($USER), so nothing here can install anything. As root: 'usermod -aG sudo $USER', then log out and back in and re-run this. (If you have sudo rights through an explicit sudoers rule rather than group membership, this check is wrong — delete it and re-run.)"
+fi
+
+# The venv doesn't exist yet, so this can't be an Ansible assert either.
+if ! command -v python3 >/dev/null 2>&1; then
+  die "python3 isn't installed, and Ansible needs it. Install your distro's python3 package, then re-run this."
+fi
+if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= tuple(int(p) for p in '${ANSIBLE_MIN_PYTHON}'.split('.')) else 1)"; then
+  die "ansible-core ${ANSIBLE_VERSION} needs Python >= ${ANSIBLE_MIN_PYTHON}, but python3 here is $(python3 -c 'import sys; print(".".join(str(p) for p in sys.version_info[:3]))'). Use a newer distro release, or pin ANSIBLE_VERSION near the top of this script back to a version that supports this Python (2.17.* needs only 3.10)."
+fi
+# --- End preflight -----------------------------------------------------
 
 installed_ansible_version() {
   "$VENV_DIR/bin/pip" show ansible-core 2>/dev/null | awk '/^Version:/{print $2}'
