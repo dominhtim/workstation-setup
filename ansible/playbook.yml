@@ -358,6 +358,34 @@
       when: not chezmoi_git.stat.exists
       changed_when: true
 
+    # `chezmoi update` asks before overwriting a file that changed since
+    # chezmoi last wrote it. This task has no TTY for the question, so the
+    # run dies with "could not open a new TTY: open /dev/tty: no such
+    # device or address" — which names the file only in passing and says
+    # nothing about what to do. Asking chezmoi first turns that into a
+    # message about the actual problem. `chezmoi status` puts a non-blank
+    # character in column 1 for exactly this case (changed since chezmoi
+    # wrote it); column 2 is just "differs from target", which is every
+    # file waiting to be applied and is none of our business.
+    - name: Check for dotfiles edited by hand since chezmoi last wrote them
+      ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi status"
+      register: chezmoi_state
+      changed_when: false
+
+    - name: Stop if a hand-edited dotfile would have to be overwritten
+      vars:
+        hand_edited: "{{ chezmoi_state.stdout_lines | reject('match', '^ ') | map('regex_replace', '^..\\s*', '') | list }}"
+      ansible.builtin.assert:
+        that: hand_edited | length == 0
+        fail_msg: >-
+          Edited by hand since chezmoi last wrote them:
+          {{ hand_edited | join(', ') }}. `chezmoi update` would prompt before
+          overwriting, and this task has no terminal to answer through. Keep the
+          edit with `chezmoi add <file>` (that pulls it into the dotfiles repo —
+          commit and push it there), or throw it away with
+          `chezmoi apply --force <file>`. Then re-run this.
+        success_msg: "No hand-edited dotfiles in the way."
+
     - name: Pull latest dotfiles and apply (chezmoi update does both, safe to run every time)
       ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi update"
       register: chezmoi_update
