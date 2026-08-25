@@ -7,16 +7,22 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$HOME/.workstation-setup-venv"
 
-# ansible-core's 2.19+ generation has a confirmed, reproducible bug on this
-# kind of setup: `become` (sudo) negotiation hangs and times out, regardless
-# of password delivery method (-K, a variable, doesn't matter) — isolated by
-# testing every layer underneath Ansible (sudo, PAM, stdin/stdout/stderr
-# redirection) working correctly on their own, then confirming the exact
-# same Python version works fine against ansible-core 2.17 but not 2.20.
-# Until upstream fixes it, this pins to a known-good version in its own
-# venv instead of trusting whatever a distro package manager ships.
-ANSIBLE_VERSION="2.17.*"
-# The glob's fixed prefix (e.g. "2.17." from "2.17.*") — used to check an
+# Still pinned in its own venv rather than trusting whatever a distro
+# package manager ships — but the pin is no longer 2.17. This used to sit
+# at 2.17.* because `become` (sudo) negotiation hung with "Timed out
+# waiting for become success or become password prompt" on 2.19+ and the
+# cause was read as an ansible-core regression. Re-tested 2026-08-24:
+# 2.20.0, 2.20.8 and 2.21.3 all run `become` fine here, including 2.20 —
+# the version originally called broken. The real cause was almost
+# certainly `Defaults use_pty` in /etc/sudoers, the classic source of that
+# exact timeout, which this script now comments out itself further down.
+# Caveat: that re-test ran on a machine already past both hurdles (use_pty
+# disabled, NOPASSWD in place), so the very first bootstrap of a truly
+# fresh machine is the one path still unverified against 2.21. If it hangs
+# there, drop this back to "2.17.*" — the venv is recreated automatically
+# on a version mismatch, so that costs nothing but a re-run.
+ANSIBLE_VERSION="2.21.*"
+# The glob's fixed prefix (e.g. "2.21." from "2.21.*") — used to check an
 # already-installed version against the pin below.
 ANSIBLE_VERSION_PREFIX="${ANSIBLE_VERSION%\**}"
 

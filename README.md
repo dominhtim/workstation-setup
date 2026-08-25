@@ -94,28 +94,39 @@ to change — that's what "idempotent" means for a module, not something you
 hand-code per step. It also ends up reading like a checklist of *what* the
 machine needs rather than a script describing *how* to check for it.
 
-## Why ansible-core is pinned to 2.17 in its own venv
+## Why ansible-core is pinned at all, and why the pin moved to 2.21
 
 `bootstrap.sh` doesn't use whatever `ansible-core` your distro's package
 manager ships — it creates a dedicated venv at `~/.workstation-setup-venv`
-and installs `ansible-core==2.17.*` into it specifically.
+and installs `ansible-core==2.21.*` into it specifically. A dedicated venv
+means the automation runs against a version this repo chose, not one a
+distro upgrade picked for you.
 
-This isn't caution for its own sake: `ansible-core` 2.19+ has a confirmed,
-reproducible bug where `become` (sudo) negotiation hangs and times out —
+The pin used to be `2.17.*`, because `become` (sudo) negotiation hung with
 `Timed out waiting for become success or become password prompt` — even
-with a correct password, regardless of how that password is supplied
-(`-K`, a variable, doesn't matter). It was isolated by testing every layer
-underneath Ansible individually (sudo directly, sudo with stdin piped, sudo
-with stdin *and* stdout *and* stderr all redirected away from any
-terminal) and finding all of them work perfectly — then confirming the
-exact same Python version behaves correctly against `ansible-core` 2.17
-and hangs against 2.20. The bug is specific to recent `ansible-core`'s own
-connection/become handling, not sudo, PAM, or Python.
+with a correct password, regardless of how it was supplied (`-K`, a
+variable, made no difference). Every layer underneath Ansible was tested
+individually (sudo directly, sudo with stdin piped, sudo with stdin *and*
+stdout *and* stderr redirected away from any terminal) and all worked, so
+the cause was read as a regression in `ansible-core` 2.19+ — 2.17 worked,
+2.20 hung.
 
-If a future `ansible-core` release fixes this, bump `ANSIBLE_VERSION` near
-the top of `bootstrap.sh` — the script checks the venv's installed version
-against it on every run and recreates `~/.workstation-setup-venv`
-automatically on a mismatch, so no manual deletion is needed.
+Re-tested on 2026-08-24 against a minimal `become` playbook: **2.20.0,
+2.20.8 and 2.21.3 all pass**, including the 2.20 that was originally
+called broken. So the diagnosis above was misattributed. The real cause
+was almost certainly `Defaults use_pty` in `/etc/sudoers` — the classic
+source of that exact timeout — which `bootstrap.sh` now detects and
+comments out itself before running the playbook. The version was never
+the problem.
+
+One caveat on that re-test: it ran on a machine already past both hurdles
+(`use_pty` disabled, passwordless sudo in place), so it can't speak for
+the very first bootstrap of a genuinely fresh machine. That path is the
+one still unverified against 2.21. If it hangs there, set
+`ANSIBLE_VERSION` near the top of `bootstrap.sh` back to `"2.17.*"` — the
+script checks the venv's installed version against the pin on every run
+and recreates `~/.workstation-setup-venv` automatically on a mismatch, so
+no manual deletion is needed either way.
 
 ## GitHub SSH access
 
