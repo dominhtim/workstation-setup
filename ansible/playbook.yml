@@ -34,6 +34,18 @@
     # `docker-compose` 2.26 (its v1 python package is long gone), Ubuntu has
     # `docker-compose-v2` and no `docker-compose` at all.
     compose_package: "{{ 'docker-compose' if ansible_facts['distribution'] == 'Debian' else 'docker-compose-v2' }}"
+    # Neovim needs pinning separately from the package list below. The
+    # dotfiles' LSP config calls vim.lsp.config() and vim.lsp.enable(),
+    # both of which landed in 0.11, and mason-lspconfig v2 calls
+    # vim.lsp.enable() itself — so on an older Neovim the entire LSP layer
+    # dies at startup with "attempt to call field 'config' (a nil value)".
+    # That's a floor, not a preference.
+    nvim_min_version: "0.11"
+    # Pinned rather than tracking 'latest': every machine sharing these
+    # dotfiles should run the same editor, and a rolling latest would mean
+    # two boxes provisioned a month apart quietly differ.
+    nvim_version: "v0.11.6"
+    nvim_arch: "{{ 'x86_64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
     # One list, used by both the preflight check and the install task below,
     # so the two can never drift apart.
     base_packages:
@@ -129,6 +141,79 @@
         name: "{{ base_packages }}"
         state: present
       become: true
+
+    # --- Neovim version floor --------------------------------------------
+    # `neovim` is in base_packages above, but a distro archive is only ever
+    # as new as the distro: Ubuntu 26.04 ships 0.11.6 while Debian 13 is
+    # still on 0.10.x. Since the dotfiles are shared across every machine
+    # and their nvim config is 0.11-only (see nvim_min_version above), a
+    # box that installed the older one isn't merely behind — its LSP setup
+    # throws three errors before you get a prompt. So: keep whatever apt
+    # gave us when it's new enough, and lay an upstream build over the top
+    # when it isn't.
+    #
+    # apt's copy is deliberately left installed rather than removed. It
+    # still owns the vi/vim alternatives, costs nothing sitting there, and
+    # /usr/local/bin precedes /usr/bin on both Debian and Ubuntu — so the
+    # symlink below simply wins on PATH, and undoing all of this is one
+    # `rm /usr/local/bin/nvim` away.
+    - name: Check which Neovim is on PATH
+      ansible.builtin.command: nvim --version
+      register: nvim_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Work out which Neovim version that is
+      ansible.builtin.set_fact:
+        # "NVIM v0.10.4" -> "0.10.4". Dev builds append "-dev-1234+abc123",
+        # which the version test can't parse, so that's trimmed too. A
+        # missing/unrunnable nvim becomes "0", which fails the floor and
+        # takes the install path — the right answer either way.
+        nvim_installed_version: >-
+          {{ (nvim_version_check.stdout_lines[0] | regex_replace('^NVIM v', '') | regex_replace('[-+].*$', ''))
+             if nvim_version_check.rc == 0 and nvim_version_check.stdout_lines | length > 0
+             else '0' }}
+
+    - name: Install an upstream Neovim when the distro's is below the floor
+      when: nvim_installed_version is not version(nvim_min_version, '>=')
+      become: true
+      block:
+        # Version-stamped directory, so bumping nvim_version installs
+        # alongside rather than half-overwriting the previous unpack (the
+        # tarball's own top-level directory name has no version in it).
+        - name: Create the install directory for the upstream Neovim
+          ansible.builtin.file:
+            path: "/opt/nvim-{{ nvim_version }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        # No checksum: upstream publishes no shasum asset for these
+        # tarballs, same as the chezmoi binary further down. HTTPS to
+        # GitHub's release CDN is the integrity guarantee in both cases.
+        - name: Download and unpack the upstream Neovim
+          ansible.builtin.unarchive:
+            src: "https://github.com/neovim/neovim/releases/download/{{ nvim_version }}/nvim-linux-{{ nvim_arch }}.tar.gz"
+            dest: "/opt/nvim-{{ nvim_version }}"
+            remote_src: true
+            extra_opts: ["--strip-components=1"]
+            creates: "/opt/nvim-{{ nvim_version }}/bin/nvim"
+
+        - name: Put the upstream Neovim ahead of the distro's on PATH
+          ansible.builtin.file:
+            src: "/opt/nvim-{{ nvim_version }}/bin/nvim"
+            dest: /usr/local/bin/nvim
+            state: link
+
+        - name: Note that Neovim was replaced
+          ansible.builtin.debug:
+            msg: >-
+              This distro's Neovim is {{ nvim_installed_version }}, below the
+              {{ nvim_min_version }} the dotfiles' LSP config needs, so
+              {{ nvim_version }} was installed to /opt and linked into
+              /usr/local/bin. If this machine had already opened nvim on the
+              old version, run ':Lazy sync' once to rebuild the plugin state.
 
     - name: Add this user to the docker group (lets you run docker without sudo)
       ansible.builtin.user:
