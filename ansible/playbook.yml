@@ -286,14 +286,33 @@
       failed_when: false
       retries: 3
       delay: 2
-      until: github_hostkey.rc == 0 and github_hostkey.stdout | length > 0
+      # Retry until there's an actual key line, not merely *some* output —
+      # the banner below is written even when no key comes back, so
+      # `stdout | length > 0` would accept a response containing no key at
+      # all and stop retrying.
+      until: github_hostkey.rc == 0 and github_hostkey.stdout_lines | reject('match', '^#') | list | length > 0
+
+    # ssh-keyscan writes a "# github.com:22 SSH-2.0-<build>" banner to
+    # stdout, not stderr (OpenSSH 10.2 here), so its raw output is two
+    # lines and only the second is a host key.
+    #
+    # Passing both to the known_hosts module meant the value could never
+    # match what was already in the file, so every run appended the pair
+    # afresh: the task reported `changed` each time and known_hosts grew by
+    # two lines per provision — 18 github.com entries on this machine
+    # before anyone noticed. The banner is the worst possible thing to have
+    # left in, too: it carries GitHub's current babeld build id, so it
+    # doesn't even hold still between runs for a comparison to succeed.
+    - name: Keep just the key line from ssh-keyscan's output
+      ansible.builtin.set_fact:
+        github_hostkey_line: "{{ github_hostkey.stdout_lines | reject('match', '^#') | first | default('') }}"
 
     - name: Add GitHub's host key to known_hosts (avoids an interactive "authenticity of host" prompt on first connect)
       ansible.builtin.known_hosts:
         name: github.com
-        key: "{{ github_hostkey.stdout }}"
+        key: "{{ github_hostkey_line }}"
         path: "{{ ansible_facts['env']['HOME'] }}/.ssh/known_hosts"
-      when: github_hostkey.rc == 0 and github_hostkey.stdout | length > 0
+      when: github_hostkey_line | length > 0
 
     - name: Read the public key so it can be displayed
       ansible.builtin.slurp:
