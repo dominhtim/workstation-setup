@@ -29,6 +29,11 @@
     project_repos:
       - git@github.com:dominhtim/TestProject.git
       - git@github.com:dominhtim/discord-bot.git
+    # Debian and Ubuntu ship the same Compose v2 Go plugin under different
+    # binary names, and each lacks the other's: Debian 13 has
+    # `docker-compose` 2.26 (its v1 python package is long gone), Ubuntu has
+    # `docker-compose-v2` and no `docker-compose` at all.
+    compose_package: "{{ 'docker-compose' if ansible_facts['distribution'] == 'Debian' else 'docker-compose-v2' }}"
     # One list, used by both the preflight check and the install task below,
     # so the two can never drift apart.
     base_packages:
@@ -46,7 +51,7 @@
       - npm
       - build-essential
       - docker.io
-      - docker-compose-v2
+      - "{{ compose_package }}"
       - docker-buildx
       - gh
 
@@ -61,12 +66,19 @@
 
     # `package` fails as a single unit: one name missing from the archives
     # takes the whole install task with it, and apt's error doesn't make it
-    # obvious which name was at fault. This repo was built on Ubuntu, where
-    # everything above is in main or universe; Debian doesn't ship `gh` in
-    # its official archive at all, for one. Probing first turns that into a
-    # named list up front instead of a wall of apt output later.
-    - name: "Preflight: probe each base package against the archives"
-      ansible.builtin.command: "apt-cache show {{ item }}"
+    # obvious which name was at fault. Package names aren't as portable
+    # across Debian and Ubuntu as they look — see `compose_package` above,
+    # where the two ship the same software under names neither of the other
+    # has. Probing first turns that into a named list up front instead of a
+    # wall of apt output later.
+    # `apt-get -s install` rather than `apt-cache show`: show exits 0 for a
+    # purely virtual name with no installation candidate (on Ubuntu,
+    # `docker-compose` is such a name, provided by docker-compose-v2), so it
+    # would wave through things that can't actually be installed. The
+    # simulated install resolves providers properly and fails on anything
+    # apt couldn't really put on the disk. It needs no root.
+    - name: "Preflight: check each base package is actually installable"
+      ansible.builtin.command: "apt-get -s install {{ item }}"
       register: pkg_probe
       changed_when: false
       failed_when: false
@@ -80,12 +92,11 @@
         that: missing_packages | length == 0
         fail_msg: >-
           Not in this distro's archives: {{ missing_packages | join(', ') }}.
-          Nothing has been changed on this machine yet. Either add the repo
-          that provides them (`gh` comes from GitHub's own apt repo at
-          cli.github.com on Debian), drop them from `base_packages` at the
-          top of this playbook and install them by hand, or run
-          `sudo apt update` first if you think the package index is just
-          stale.
+          Nothing has been changed on this machine yet. Check whether this
+          distro calls them something else, add the repo that provides
+          them, or drop them from `base_packages` at the top of this
+          playbook and install them by hand — and run `sudo apt update`
+          first if you think the package index is just stale.
         success_msg: "All {{ base_packages | length }} base packages are available."
       when: ansible_facts['pkg_mgr'] == 'apt'
     # --- End preflight -------------------------------------------------
