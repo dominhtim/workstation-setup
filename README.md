@@ -48,11 +48,11 @@ before its first task changes anything:
 
 - **Every base package resolves in the archives.** They install as one
   unit, so a single missing name would otherwise take the whole task down
-  with an apt error that doesn't say which name was at fault. This was
-  built on Ubuntu, where all of them are in main or universe; **Debian
-  doesn't ship `gh` in its official archive** — add GitHub's apt repo
-  (`cli.github.com`) or drop `gh` from `base_packages` at the top of the
-  playbook.
+  with an apt error that doesn't say which name was at fault. Names are
+  less portable between Debian and Ubuntu than they look: Compose v2 is
+  `docker-compose` on Debian 13 and `docker-compose-v2` on Ubuntu, and
+  neither distro has the other's name. The playbook picks the right one by
+  distribution; anything else that turns up missing gets named here.
 - **systemd is what's running.** Where it isn't — Debian or Ubuntu under
   WSL without `systemd=true` in `/etc/wsl.conf` — enabling the docker
   service is skipped with a note instead of failing the run.
