@@ -27,6 +27,36 @@ binary are only touched if missing; the dotfiles step always runs
 applies it. Re-running this after you've pushed a dotfiles change is a
 legitimate way to sync a machine, not just a first-time setup step.
 
+## What has to be true before you run it
+
+Both entry points check their own preconditions and stop with a specific
+message rather than failing somewhere in the middle.
+
+`bootstrap.sh` checks what has to hold before Ansible can run at all:
+
+- **A real terminal.** Don't pipe it, redirect it, or background it —
+  `visudo` and the SSH-key checkpoint both need to prompt you.
+- **`sudo` installed, and you in a sudo group.** A default Debian install
+  with a root password set does neither, and Ansible can't warn about it
+  itself — `become` would fail on the playbook's first task.
+- **Python >= 3.12**, the floor for the pinned `ansible-core` 2.21 (see
+  below). Debian 13 and Ubuntu 24.04+ are fine; Debian 12 and Ubuntu 22.04
+  are not.
+
+`ansible/playbook.yml` then checks the machine it's about to provision,
+before its first task changes anything:
+
+- **Every base package resolves in the archives.** They install as one
+  unit, so a single missing name would otherwise take the whole task down
+  with an apt error that doesn't say which name was at fault. This was
+  built on Ubuntu, where all of them are in main or universe; **Debian
+  doesn't ship `gh` in its official archive** — add GitHub's apt repo
+  (`cli.github.com`) or drop `gh` from `base_packages` at the top of the
+  playbook.
+- **systemd is what's running.** Where it isn't — Debian or Ubuntu under
+  WSL without `systemd=true` in `/etc/wsl.conf` — enabling the docker
+  service is skipped with a note instead of failing the run.
+
 ## What it does (`ansible/playbook.yml`)
 
 1. Installs base packages (git, zsh, curl, tmux, neovim, fzf, ripgrep, unzip,
