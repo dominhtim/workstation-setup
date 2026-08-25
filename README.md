@@ -62,21 +62,27 @@ before its first task changes anything:
 1. Installs base packages (git, zsh, curl, tmux, neovim, fzf, ripgrep, unzip,
    xclip, openssh-client, nodejs, npm, build-essential, docker.io,
    docker-compose-v2, docker-buildx, gh)
-2. Adds you to the `docker` group and enables/starts the docker service
-3. Generates an SSH key for GitHub if you don't already have one, and
+2. Replaces Neovim with an upstream build when the distro's is older than
+   0.11 — Ubuntu 26.04 ships 0.11.6, Debian 13 is still on 0.10.x, and the
+   dotfiles' nvim config is 0.11-only (`vim.lsp.config` / `vim.lsp.enable`),
+   so the older one starts with its whole LSP layer erroring out. Unpacked
+   into `/opt/nvim-<version>` and linked into `/usr/local/bin`, which
+   precedes `/usr/bin` on PATH; apt's copy is left installed and untouched
+3. Adds you to the `docker` group and enables/starts the docker service
+4. Generates an SSH key for GitHub if you don't already have one, and
    prints the public key immediately — right after packages, before the
    slower steps below, so you have time to add it to GitHub while they run
-4. Clones oh-my-zsh + powerlevel10k + zsh-autosuggestions + zsh-syntax-highlighting
-5. Sets zsh as the default shell
-6. Installs chezmoi (plain binary from its GitHub releases, no curl\|sh installer)
-7. Seeds chezmoi's config with your git identity, so its own interactive
+5. Clones oh-my-zsh + powerlevel10k + zsh-autosuggestions + zsh-syntax-highlighting
+6. Sets zsh as the default shell
+7. Installs chezmoi (plain binary from its GitHub releases, no curl\|sh installer)
+8. Seeds chezmoi's config with your git identity, so its own interactive
    prompt never fires — Ansible tasks don't have a real TTY for that prompt
    to work through anyway
-8. Pauses, only if the dotfiles haven't been cloned yet, to give you one
+9. Pauses, only if the dotfiles haven't been cloned yet, to give you one
    more chance to add the SSH key before it's actually needed
-9. `chezmoi init --ssh` (first run only) + `chezmoi update` (every run) to
-   pull and apply the dotfiles repo over SSH
-10. Clones your project repos into `~/projects` (first run only — see
+10. `chezmoi init --ssh` (first run only) + `chezmoi update` (every run) to
+    pull and apply the dotfiles repo over SSH
+11. Clones your project repos into `~/projects` (first run only — see
     below for details)
 
 ## Changing which dotfiles repo gets applied
