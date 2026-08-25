@@ -358,7 +358,21 @@
       when: not chezmoi_git.stat.exists
       changed_when: true
 
-    # `chezmoi update` asks before overwriting a file that changed since
+    # `chezmoi update` is pull + apply in one. It's split here because the
+    # check between the two halves is only meaningful against the freshly
+    # pulled target: a file that looks hand-edited against yesterday's
+    # source can be perfectly in step with what was just pushed, and
+    # checking before the pull blocks on a divergence the pull itself
+    # resolves. That is not hypothetical — it is exactly what happened
+    # when the fix for a hand-edited .gitignore_global was sitting in the
+    # dotfiles repo, unpulled, while this check refused to let the pull
+    # happen.
+    - name: Pull the latest dotfiles (apply comes after the check below)
+      ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi git -- pull --ff-only"
+      register: chezmoi_pull
+      changed_when: "'Already up to date' not in chezmoi_pull.stdout"
+
+    # chezmoi apply asks before overwriting a file that changed since
     # chezmoi last wrote it. This task has no TTY for the question, so the
     # run dies with "could not open a new TTY: open /dev/tty: no such
     # device or address" — which names the file only in passing and says
@@ -379,17 +393,16 @@
         that: hand_edited | length == 0
         fail_msg: >-
           Edited by hand since chezmoi last wrote them:
-          {{ hand_edited | join(', ') }}. `chezmoi update` would prompt before
+          {{ hand_edited | join(', ') }}. The apply below would prompt before
           overwriting, and this task has no terminal to answer through. Keep the
           edit with `chezmoi add <file>` (that pulls it into the dotfiles repo —
           commit and push it there), or throw it away with
           `chezmoi apply --force <file>`. Then re-run this.
         success_msg: "No hand-edited dotfiles in the way."
 
-    - name: Pull latest dotfiles and apply (chezmoi update does both, safe to run every time)
-      ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi update"
-      register: chezmoi_update
-      changed_when: "'Already up to date' not in chezmoi_update.stdout"
+    - name: Apply the dotfiles (safe to run every time — a no-op when nothing differs)
+      ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi apply"
+      changed_when: chezmoi_state.stdout | length > 0
 
     # Placed after the dotfiles clone on purpose: a successful SSH clone
     # above already proves the SSH key is registered with GitHub, so
