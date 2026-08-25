@@ -1,16 +1,6 @@
 ---
-# Provisions a machine, then applies the dotfiles from the separate
-# `dotfiles` repo (github.com/dominhtim/dotfiles) via chezmoi.
-# Safe to re-run: every task is idempotent (Ansible's `changed`/`ok` states
-# handle that natively, no `install.sh`-style manual "does it exist" checks
-# needed for most of this).
-#
-# Run with: ansible-playbook -K ansible/playbook.yml
-# -K prompts for a sudo password. Only actually needed the very first time:
-# the first task below grants this user passwordless sudo permanently, so
-# every task after it in this same run — and every run after this one —
-# needs no password at all. bootstrap.sh detects this automatically and
-# drops -K once it's in place.
+# Provisions a machine, then applies github.com/dominhtim/dotfiles via chezmoi.
+# Run with: ansible-playbook -K ansible/playbook.yml   (or ../bootstrap.sh)
 
 - name: Bootstrap dev workstation (packages, zsh, chezmoi-managed dotfiles)
   hosts: localhost
@@ -18,36 +8,25 @@
   gather_facts: true
 
   vars:
-    # Change these if you fork this repo for someone else, or use a different GitHub account.
+    # Change these if you fork this repo or use a different GitHub account.
     git_name: "dominhtim"
     git_email: "dominhtim@gmail.com"
     dotfiles_repo: "dominhtim/dotfiles"
     chezmoi_arch: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
     projects_dir: "{{ ansible_facts['env']['HOME'] }}/projects"
-    # Add/remove repos here — cloned once into ~/projects, never touched again
-    # after that (these are your working repos, not something to auto-sync).
+    # Cloned once into ~/projects, never updated after that.
     project_repos:
       - git@github.com:dominhtim/TestProject.git
       - git@github.com:dominhtim/discord-bot.git
-    # Debian and Ubuntu ship the same Compose v2 Go plugin under different
-    # binary names, and each lacks the other's: Debian 13 has
-    # `docker-compose` 2.26 (its v1 python package is long gone), Ubuntu has
-    # `docker-compose-v2` and no `docker-compose` at all.
+    # Debian and Ubuntu package Compose v2 under different names, and
+    # neither distro has the other's.
     compose_package: "{{ 'docker-compose' if ansible_facts['distribution'] == 'Debian' else 'docker-compose-v2' }}"
-    # Neovim needs pinning separately from the package list below. The
-    # dotfiles' LSP config calls vim.lsp.config() and vim.lsp.enable(),
-    # both of which landed in 0.11, and mason-lspconfig v2 calls
-    # vim.lsp.enable() itself — so on an older Neovim the entire LSP layer
-    # dies at startup with "attempt to call field 'config' (a nil value)".
-    # That's a floor, not a preference.
+    # A hard floor, not a preference: the dotfiles' LSP config is 0.11-only.
     nvim_min_version: "0.11"
-    # Pinned rather than tracking 'latest': every machine sharing these
-    # dotfiles should run the same editor, and a rolling latest would mean
-    # two boxes provisioned a month apart quietly differ.
+    # Pinned so machines provisioned months apart run the same editor.
     nvim_version: "v0.11.6"
     nvim_arch: "{{ 'x86_64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
-    # One list, used by both the preflight check and the install task below,
-    # so the two can never drift apart.
+    # Used by both the preflight probe and the install task, so they can't drift.
     base_packages:
       - git
       - zsh
@@ -69,26 +48,10 @@
 
   tasks:
     # --- Preflight -----------------------------------------------------
-    # Everything here runs before the first task that changes anything, so
-    # a machine this playbook can't finish on is left exactly as it was
-    # rather than half-provisioned. Checks that have to happen even earlier
-    # than Ansible (sudo, a real terminal, the controller's Python version)
-    # live in bootstrap.sh instead — Ansible can't make them, it needs all
-    # three to already hold before its own first task runs.
+    # Runs before anything mutates the machine. Earlier checks are in bootstrap.sh.
 
-    # `package` fails as a single unit: one name missing from the archives
-    # takes the whole install task with it, and apt's error doesn't make it
-    # obvious which name was at fault. Package names aren't as portable
-    # across Debian and Ubuntu as they look — see `compose_package` above,
-    # where the two ship the same software under names neither of the other
-    # has. Probing first turns that into a named list up front instead of a
-    # wall of apt output later.
-    # `apt-get -s install` rather than `apt-cache show`: show exits 0 for a
-    # purely virtual name with no installation candidate (on Ubuntu,
-    # `docker-compose` is such a name, provided by docker-compose-v2), so it
-    # would wave through things that can't actually be installed. The
-    # simulated install resolves providers properly and fails on anything
-    # apt couldn't really put on the disk. It needs no root.
+    # A simulated install, not `apt-cache show`: it resolves virtual names
+    # and fails on anything apt couldn't really put on the disk. Needs no root.
     - name: "Preflight: check each base package is actually installable"
       ansible.builtin.command: "apt-get -s install {{ item }}"
       register: pkg_probe
@@ -122,10 +85,8 @@
         mode: "0750"
       become: true
 
-    # This is the one task in the whole playbook that a fresh machine can't
-    # get around needing a real, working sudo credential for — nothing can
-    # grant itself root from nothing. Everything after it, though, runs
-    # passwordless, in this run and every run after.
+    # The only task needing a real sudo credential; everything after it,
+    # here and on every future run, is passwordless.
     - name: Grant this user passwordless sudo (one-time; every task after this is then passwordless)
       ansible.builtin.copy:
         dest: "/etc/sudoers.d/90-{{ ansible_facts['user_id'] }}-nopasswd"
@@ -143,20 +104,8 @@
       become: true
 
     # --- Neovim version floor --------------------------------------------
-    # `neovim` is in base_packages above, but a distro archive is only ever
-    # as new as the distro: Ubuntu 26.04 ships 0.11.6 while Debian 13 is
-    # still on 0.10.x. Since the dotfiles are shared across every machine
-    # and their nvim config is 0.11-only (see nvim_min_version above), a
-    # box that installed the older one isn't merely behind — its LSP setup
-    # throws three errors before you get a prompt. So: keep whatever apt
-    # gave us when it's new enough, and lay an upstream build over the top
-    # when it isn't.
-    #
-    # apt's copy is deliberately left installed rather than removed. It
-    # still owns the vi/vim alternatives, costs nothing sitting there, and
-    # /usr/local/bin precedes /usr/bin on both Debian and Ubuntu — so the
-    # symlink below simply wins on PATH, and undoing all of this is one
-    # `rm /usr/local/bin/nvim` away.
+    # Keep apt's nvim when it clears nvim_min_version, otherwise lay an
+    # upstream build over it on PATH. apt's copy is left installed.
     - name: Check which Neovim is on PATH
       ansible.builtin.command: nvim --version
       register: nvim_version_check
@@ -165,10 +114,8 @@
 
     - name: Work out which Neovim version that is
       ansible.builtin.set_fact:
-        # "NVIM v0.10.4" -> "0.10.4". Dev builds append "-dev-1234+abc123",
-        # which the version test can't parse, so that's trimmed too. A
-        # missing/unrunnable nvim becomes "0", which fails the floor and
-        # takes the install path — the right answer either way.
+        # "NVIM v0.10.4" -> "0.10.4", trimming any "-dev-1234+abc" suffix.
+        # A missing nvim becomes "0", which fails the floor and installs.
         nvim_installed_version: >-
           {{ (nvim_version_check.stdout_lines[0] | regex_replace('^NVIM v', '') | regex_replace('[-+].*$', ''))
              if nvim_version_check.rc == 0 and nvim_version_check.stdout_lines | length > 0
@@ -178,9 +125,8 @@
       when: nvim_installed_version is not version(nvim_min_version, '>=')
       become: true
       block:
-        # Version-stamped directory, so bumping nvim_version installs
-        # alongside rather than half-overwriting the previous unpack (the
-        # tarball's own top-level directory name has no version in it).
+        # Version-stamped so a bump installs alongside the previous unpack
+        # rather than half-overwriting it.
         - name: Create the install directory for the upstream Neovim
           ansible.builtin.file:
             path: "/opt/nvim-{{ nvim_version }}"
@@ -189,9 +135,8 @@
             group: root
             mode: "0755"
 
-        # No checksum: upstream publishes no shasum asset for these
-        # tarballs, same as the chezmoi binary further down. HTTPS to
-        # GitHub's release CDN is the integrity guarantee in both cases.
+        # No checksum: upstream publishes no shasum asset for these tarballs.
+        # HTTPS to GitHub's release CDN is the integrity guarantee.
         - name: Download and unpack the upstream Neovim
           ansible.builtin.unarchive:
             src: "https://github.com/neovim/neovim/releases/download/{{ nvim_version }}/nvim-linux-{{ nvim_arch }}.tar.gz"
@@ -222,10 +167,8 @@
         append: true
       become: true
 
-    # Skipped rather than failed where there's no systemd to talk to —
-    # Debian/Ubuntu under WSL without `systemd=true` in /etc/wsl.conf being
-    # the case that actually turns up. Everything else here still applies;
-    # only starting the daemon has to be done by hand.
+    # Skipped, not failed, without systemd — WSL without `systemd=true`
+    # in /etc/wsl.conf is the case that turns up.
     - name: Ensure the docker service is enabled and running
       ansible.builtin.systemd:
         name: docker
@@ -243,24 +186,9 @@
           the [boot] section of /etc/wsl.conf and restart the distro.
       when: ansible_facts['service_mgr'] != 'systemd'
 
-    # --- SSH key for GitHub, done early on purpose -----------------------
-    # This used to happen right before the dotfiles clone, which meant you
-    # only found out you needed to add a key to GitHub after everything
-    # else had already finished — a hard failure, right at the end, with
-    # no way to continue the same run. Doing it here instead means you get
-    # the key to paste in within the first few seconds, with the slower
-    # steps below (oh-my-zsh, plugin clones, downloading chezmoi) running
-    # while you go add it. There's still a checkpoint right before the
-    # actual clone (search for "Pause" below) in case you need more time
-    # than that.
-    #
-    # No token or password is ever stored anywhere in this repo. The
-    # private key is generated on the machine and never leaves it; the
-    # only thing that needs to go anywhere is the public key, which isn't
-    # secret by definition. Adding it to your GitHub account is the one
-    # step that genuinely can't be automated — GitHub requires that to
-    # happen through an authenticated browser session as a deliberate
-    # security boundary, not a gap in this playbook.
+    # --- SSH key for GitHub ----------------------------------------------
+    # Deliberately early: the key is printed within seconds, so it can be
+    # added to GitHub while the slow steps below run. See CLAUDE.md.
     - name: Ensure ~/.ssh exists
       ansible.builtin.file:
         path: "{{ ansible_facts['env']['HOME'] }}/.ssh"
@@ -286,23 +214,12 @@
       failed_when: false
       retries: 3
       delay: 2
-      # Retry until there's an actual key line, not merely *some* output —
-      # the banner below is written even when no key comes back, so
-      # `stdout | length > 0` would accept a response containing no key at
-      # all and stop retrying.
+      # Retry until a real key line arrives: the banner is written to stdout
+      # even when no key comes back, so a length check would accept that.
       until: github_hostkey.rc == 0 and github_hostkey.stdout_lines | reject('match', '^#') | list | length > 0
 
-    # ssh-keyscan writes a "# github.com:22 SSH-2.0-<build>" banner to
-    # stdout, not stderr (OpenSSH 10.2 here), so its raw output is two
-    # lines and only the second is a host key.
-    #
-    # Passing both to the known_hosts module meant the value could never
-    # match what was already in the file, so every run appended the pair
-    # afresh: the task reported `changed` each time and known_hosts grew by
-    # two lines per provision — 18 github.com entries on this machine
-    # before anyone noticed. The banner is the worst possible thing to have
-    # left in, too: it carries GitHub's current babeld build id, so it
-    # doesn't even hold still between runs for a comparison to succeed.
+    # ssh-keyscan writes its banner to stdout, not stderr. Including it
+    # here makes known_hosts grow by two lines per run — see CLAUDE.md.
     - name: Keep just the key line from ssh-keyscan's output
       ansible.builtin.set_fact:
         github_hostkey_line: "{{ github_hostkey.stdout_lines | reject('match', '^#') | first | default('') }}"
@@ -335,7 +252,7 @@
       ansible.builtin.git:
         repo: https://github.com/ohmyzsh/ohmyzsh.git
         dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh"
-        version: master   # intentionally tracks upstream tip, not pinned — this is a rolling theme/plugin install
+        version: master   # rolling, intentionally unpinned
         depth: 1
       when: not omz_dir.stat.exists
 
@@ -394,9 +311,7 @@
         state: directory
         mode: "0700"
 
-    # Pre-seeding chezmoi's own config with the identity data means `chezmoi
-    # init` below never has to prompt interactively — which matters because
-    # Ansible tasks don't have a real TTY to prompt through anyway.
+    # Ansible tasks have no TTY, so chezmoi init's own prompt must never fire.
     - name: Seed chezmoi's config with git identity (so its own init prompt is skipped)
       ansible.builtin.template:
         src: chezmoi.toml.j2
@@ -405,10 +320,8 @@
 
     - name: Check whether the dotfiles repo has already been cloned by chezmoi
       ansible.builtin.stat:
-        # Checking for .git specifically, not just the parent directory —
-        # a clone that failed partway through (e.g. an auth prompt on a
-        # private repo) can still leave the parent directory behind without
-        # a real git checkout inside it.
+        # .git specifically: a clone that failed partway leaves the parent
+        # directory behind with no checkout inside it.
         path: "{{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi/.git"
       register: chezmoi_git_before
 
@@ -436,18 +349,14 @@
         state: absent
       when: chezmoi_git_before.stat.exists and chezmoi_remote.stdout is defined and chezmoi_remote.stdout.startswith('https://')
 
-    # Re-checked after the self-healing above, rather than reusing
-    # chezmoi_git_before — that fact would be stale (still say "exists")
-    # even immediately after a task just deleted the directory.
+    # chezmoi_git_before is stale after the self-healing above — it would
+    # still say "exists" for a directory just deleted.
     - name: Re-check whether a valid clone still exists after any self-healing above
       ansible.builtin.stat:
         path: "{{ ansible_facts['env']['HOME'] }}/.local/share/chezmoi/.git"
       register: chezmoi_git
 
-    # Only fires when a clone is actually about to happen (fresh machine,
-    # a previously broken clone, or one just cleared for using the wrong
-    # remote above) — once the dotfiles are cloned successfully, this and
-    # everything above it about SSH is skipped on every future run.
+    # Only fires when a clone is about to happen; skipped on every run after.
     - name: Pause here if the SSH key might not be added to GitHub yet
       ansible.builtin.pause:
         prompt: >-
@@ -462,29 +371,15 @@
       when: not chezmoi_git.stat.exists
       changed_when: true
 
-    # `chezmoi update` is pull + apply in one. It's split here because the
-    # check between the two halves is only meaningful against the freshly
-    # pulled target: a file that looks hand-edited against yesterday's
-    # source can be perfectly in step with what was just pushed, and
-    # checking before the pull blocks on a divergence the pull itself
-    # resolves. That is not hypothetical — it is exactly what happened
-    # when the fix for a hand-edited .gitignore_global was sitting in the
-    # dotfiles repo, unpulled, while this check refused to let the pull
-    # happen.
+    # `chezmoi update` is pull + apply in one, split here because the check
+    # between them is only meaningful against the freshly pulled target.
     - name: Pull the latest dotfiles (apply comes after the check below)
       ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi git -- pull --ff-only"
       register: chezmoi_pull
       changed_when: "'Already up to date' not in chezmoi_pull.stdout"
 
-    # chezmoi apply asks before overwriting a file that changed since
-    # chezmoi last wrote it. This task has no TTY for the question, so the
-    # run dies with "could not open a new TTY: open /dev/tty: no such
-    # device or address" — which names the file only in passing and says
-    # nothing about what to do. Asking chezmoi first turns that into a
-    # message about the actual problem. `chezmoi status` puts a non-blank
-    # character in column 1 for exactly this case (changed since chezmoi
-    # wrote it); column 2 is just "differs from target", which is every
-    # file waiting to be applied and is none of our business.
+    # Column 1 non-blank means "changed since chezmoi wrote it", which is
+    # what apply would prompt about. Column 2 is every pending file.
     - name: Check for dotfiles edited by hand since chezmoi last wrote them
       ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi status"
       register: chezmoi_state
@@ -508,9 +403,8 @@
       ansible.builtin.command: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi apply"
       changed_when: chezmoi_state.stdout | length > 0
 
-    # Placed after the dotfiles clone on purpose: a successful SSH clone
-    # above already proves the SSH key is registered with GitHub, so
-    # there's no need to repeat the pause/reminder checkpoint here too.
+    # After the dotfiles clone on purpose: that clone already proves the
+    # SSH key works, so no second checkpoint is needed here.
     - name: Ensure ~/projects exists
       ansible.builtin.file:
         path: "{{ projects_dir }}"
@@ -518,7 +412,7 @@
         mode: "0755"
 
     - name: Clone project repos (first run only — these are your working repos, left alone after that, not auto-synced)
-      ansible.builtin.git:  # noqa: latest[git] — these are active dev repos, pinning to a frozen commit would be wrong here, not safer
+      ansible.builtin.git:  # noqa: latest[git] — active dev repos, deliberately unpinned
         repo: "{{ item }}"
         dest: "{{ projects_dir }}/{{ item | basename | regex_replace('\\.git$', '') }}"
         version: HEAD
