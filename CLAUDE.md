@@ -26,6 +26,7 @@ documentation of what the code currently does.
   off. Deliberately thin; provisioning logic goes in the playbook.
 - `ansible/playbook.yml` — everything the machine actually gets.
 - `ansible/templates/chezmoi.toml.j2` — pre-seeds chezmoi's identity data.
+- `ansible/profiles/` — per-distro package names, picked automatically.
 - `ansible/requirements.yml` — collections beyond `ansible-core`, installed
   by `bootstrap.sh`.
 
@@ -91,17 +92,27 @@ exact failure this repo already spent a debugging session on.
 
 ## Supporting more than one distro family
 
-The playbook targets apt (Debian, Ubuntu), pacman (Arch, CachyOS and other
-derivatives) and dnf (Fedora). Everything distro-specific is keyed on
-`ansible_facts['pkg_mgr']`, never on `distribution`: Ansible reports
-derivatives inconsistently (CachyOS isn't in its Arch family list), but the
-package manager is detected from the binary on disk. Fedora reports `dnf5`,
-not `dnf`, so both keys exist.
+No tool can work out that Docker is `docker.io` on Debian and
+`moby-engine` on Fedora, so that mapping has to be written down. It lives in
+`ansible/profiles/`, layered so each file holds only what differs:
 
-`base_packages` is `common_packages` (identical names everywhere) plus
-`distro_packages[pkg_mgr]`. Adding a family means one entry there and one
-in `pkg_probe_cmd`; an unknown manager is stopped by the first preflight
-assert before anything else runs.
+1. `default_packages` in the playbook: one entry per thing to install
+   (`docker`, `toolchain`, `ssh_client`, …) under the name most distros use.
+2. `profiles/<pkg_mgr>.yml` (required): renames for that family, plus the
+   family's `pkg_probe_cmd`.
+3. `profiles/<distribution>.yml` (optional): renames for one distro that
+   disagrees with its family — `Ubuntu.yml` exists only for Compose v2.
+
+Later layers win, per entry (`combine`). A value can be a list (dnf's
+toolchain is three packages) or `[]` to drop that entry on that distro.
+
+The required layer is keyed on `ansible_facts['pkg_mgr']`, not
+`distribution` or `os_family`: Ansible reports derivatives inconsistently
+(CachyOS isn't in its Arch family list), but the package manager is
+detected from the binary on disk. So derivatives — CachyOS, EndeavourOS,
+Mint, Pop!_OS — need no file of their own. Fedora reports `dnf5`, hence the
+`dnf5.yml` symlink. An unknown package manager stops at the first preflight
+assert, naming the file to create.
 
 `ansible.builtin.package` hands off to a per-manager module. apt and dnf
 ship in `ansible-core`; pacman lives in `community.general`, which is why
@@ -129,7 +140,7 @@ password-prompt path on a fresh Arch or Fedora box is unverified.
 task down, and the package manager's error doesn't make it obvious which
 name was at fault.
 
-Each manager has a non-root probe in `pkg_probe_cmd` that resolves the name
+Each profile's `pkg_probe_cmd` is a non-root probe that resolves the name
 the way a real install would: `apt-get -s install`, `pacman -Sp`, and
 `dnf repoquery --whatprovides`. A missing name shows up as a non-zero exit
 or as empty output — dnf exits 0 with nothing printed, so exit code alone
@@ -145,15 +156,15 @@ no root.
 Package names are less portable across Debian and Ubuntu than they look:
 Debian 13 has `docker-compose` 2.26 (its v1 python package is long gone),
 Ubuntu has `docker-compose-v2` and only a virtual `docker-compose`. Hence
-the Debian/Ubuntu conditional inside `distro_packages.apt`.
+`profiles/Ubuntu.yml`.
 
 ## Why Neovim has a version floor
 
 A distro archive is only ever as new as the distro: Ubuntu 26.04 and
 Fedora 44 ship 0.11.6, Arch 0.12, Debian 13 is still on 0.10.x. The shared
 dotfiles' nvim config calls `vim.lsp.config()` / `vim.lsp.enable()` (both
-landed in 0.11), and mason-lspconfig v2 calls `vim.lsp.enable()` itself — so on an older Neovim
-the entire LSP layer dies at startup with `attempt to call field 'config'
+landed in 0.11), and mason-lspconfig v2 calls `vim.lsp.enable()` itself —
+so on an older Neovim the entire LSP layer dies at startup with `attempt to call field 'config'
 (a nil value)`. A box with the older one isn't merely behind; it throws
 three errors before you get a prompt.
 

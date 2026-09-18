@@ -1,0 +1,10 @@
+---
+# Fedora and other dnf distros. Ansible reports Fedora as dnf5; dnf5.yml
+# links here.
+# dnf exits 0 with no output for a missing name; the preflight treats both
+# a non-zero exit and empty output as "missing".
+pkg_probe_cmd: dnf -q repoquery --whatprovides
+packages:
+  toolchain: [gcc, gcc-c++, make]
+  docker: moby-engine
+  ssh_client: openssh-clients

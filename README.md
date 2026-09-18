@@ -44,10 +44,10 @@ Before Ansible can run at all (`bootstrap.sh`):
 
 Before the machine is touched (`ansible/playbook.yml`):
 
-- **A supported package manager** — apt, pacman or dnf. Anything else stops
-  with a message naming what to add.
-- **Every base package resolves in the distro's repositories.** Anything missing is named
-  up front, before the first change is made.
+- **A profile for this package manager** — apt, pacman and dnf ship with
+  one. Anything else stops with a message naming the file to add.
+- **Every base package resolves in the distro's repositories.** Anything
+  missing is named up front, before the first change is made.
 - **systemd is running.** Where it isn't — typically WSL without
   `systemd=true` in `/etc/wsl.conf` — enabling the docker service is skipped
   with a note instead of failing the run.
@@ -57,7 +57,7 @@ Before the machine is touched (`ansible/playbook.yml`):
 1. Installs base packages: git, zsh, curl, tmux, neovim, fzf, ripgrep, unzip,
    xclip, wl-clipboard, nodejs, npm, a C toolchain, Docker with Compose v2
    and buildx, the OpenSSH client, and gh — each under whatever name the
-   distro uses (`distro_packages` in the playbook)
+   distro uses (see [Other distros](#other-distros))
 2. Installs an upstream Neovim into `/opt` and links it into `/usr/local/bin`
    when the distro's is older than 0.11, which the dotfiles' LSP config needs
 3. Adds you to the `docker` group, enables and starts the docker service
@@ -69,6 +69,26 @@ Before the machine is touched (`ansible/playbook.yml`):
 8. Pauses — only if the dotfiles aren't cloned yet — for the SSH key
 9. Clones and applies the dotfiles repo over SSH
 10. Clones your project repos into `~/projects` (first run only)
+
+## Other distros
+
+The distro is detected automatically. Package names that differ between
+distros live in `ansible/profiles/`, and each file holds only the
+differences — `pacman.yml` is two lines:
+
+```yaml
+packages:
+  toolchain: base-devel
+  github_cli: github-cli
+```
+
+Derivatives (CachyOS, EndeavourOS, Manjaro, Mint, Pop!_OS, …) use their
+package manager's profile and need nothing extra. For a distro with a
+package manager that has no profile yet, the playbook stops before changing
+anything and names the file to create: copy an existing profile, set
+`pkg_probe_cmd`, and rename whatever the preflight reports as missing. A
+single distro that disagrees with its family gets its own small override
+file, named as Ansible reports it (`Ubuntu.yml`).
 
 ## Configuration
 
@@ -143,10 +163,10 @@ discard it with `chezmoi apply --force <file>`.
 **A base package isn't in the repositories** — the preflight names it before
 anything is changed. Refresh the package index in case it's stale
 (`sudo apt update`, `sudo pacman -Syu`, `sudo dnf makecache`); otherwise
-find the name this distro uses and fix it in `distro_packages`.
+find the name this distro uses and set it in its profile under
+`ansible/profiles/`.
 
-**Unsupported package manager** — add an entry for it to both
-`distro_packages` and `pkg_probe_cmd` at the top of the playbook.
+**No profile for this package manager** — see [Other distros](#other-distros).
 
 **Neovim was replaced and plugins misbehave** — run `:Lazy sync` once.
 

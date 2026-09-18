@@ -23,77 +23,74 @@
     # Pinned so machines provisioned months apart run the same editor.
     nvim_version: "v0.11.6"
     nvim_arch: "{{ 'x86_64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
-    # Same name on every supported package manager.
-    common_packages:
-      - git
-      - zsh
-      - curl
-      - tmux
-      - neovim
-      - fzf
-      - ripgrep
-      - unzip
-      - xclip
-      - wl-clipboard
-      - nodejs
-      - npm
-    # Names that differ per package manager, keyed by ansible_facts['pkg_mgr'].
-    # Supporting another distro family is one more entry here and in pkg_probe_cmd.
-    distro_packages:
-      apt:
-        - build-essential
-        - docker.io
-        # Debian and Ubuntu package Compose v2 under different names.
-        - "{{ 'docker-compose' if ansible_facts['distribution'] == 'Debian' else 'docker-compose-v2' }}"
-        - docker-buildx
-        - openssh-client
-        - gh
-      pacman:
-        - base-devel
-        - docker
-        - docker-compose
-        - docker-buildx
-        - openssh
-        - github-cli
-      dnf: &rpm_packages
-        - gcc
-        - gcc-c++
-        - make
-        - moby-engine
-        - docker-compose
-        - docker-buildx
-        - openssh-clients
-        - gh
-      dnf5: *rpm_packages
-    # Non-root "could this be installed?" probe per package manager. A missing
-    # name gives a non-zero exit or empty output (dnf exits 0 with no output).
-    pkg_probe_cmd:
-      apt: apt-get -s install
-      pacman: pacman -Sp --print-format %n
-      dnf: dnf -q repoquery --whatprovides
-      dnf5: dnf -q repoquery --whatprovides
-    # Used by both the preflight probe and the install task, so they can't drift.
-    base_packages: "{{ common_packages + distro_packages[ansible_facts['pkg_mgr']] }}"
+    # One entry per thing to install, under the name most distros use. A
+    # profile in profiles/ renames entries for its distro family; see CLAUDE.md.
+    default_packages:
+      git: git
+      zsh: zsh
+      curl: curl
+      tmux: tmux
+      neovim: neovim
+      fzf: fzf
+      ripgrep: ripgrep
+      unzip: unzip
+      xclip: xclip
+      wl_clipboard: wl-clipboard
+      nodejs: nodejs
+      npm: npm
+      toolchain: [gcc, make]
+      docker: docker
+      compose: docker-compose
+      buildx: docker-buildx
+      ssh_client: openssh
+      github_cli: gh
 
   tasks:
     # --- Preflight -----------------------------------------------------
     # Runs before anything mutates the machine. Earlier checks are in bootstrap.sh.
 
-    - name: "Preflight: stop if this package manager isn't supported"
+    # Package manager profile first (required), then an optional per-distro
+    # one; a later layer's names win.
+    - name: "Preflight: find the package profiles for this machine"
+      ansible.builtin.set_fact:
+        pkg_mgr_profile: "{{ playbook_dir }}/profiles/{{ ansible_facts['pkg_mgr'] }}.yml"
+        distro_profile: "{{ playbook_dir }}/profiles/{{ ansible_facts['distribution'] }}.yml"
+
+    - name: "Preflight: stop if there's no profile for this package manager"
       ansible.builtin.assert:
-        that: ansible_facts['pkg_mgr'] in distro_packages
+        that: pkg_mgr_profile is file
         fail_msg: >-
-          This machine uses '{{ ansible_facts['pkg_mgr'] }}', which this
-          playbook has no package names for (supported:
-          {{ distro_packages.keys() | join(', ') }}). Nothing has been
-          changed yet. Add an entry for it to `distro_packages` and
-          `pkg_probe_cmd` at the top of this playbook.
+          This machine uses '{{ ansible_facts['pkg_mgr'] }}', and there's no
+          profiles/{{ ansible_facts['pkg_mgr'] }}.yml for it. Nothing has
+          been changed yet. Copy an existing profile in ansible/profiles/ to
+          that name, set its pkg_probe_cmd, and rename any packages this
+          distro calls something else.
         quiet: true
+
+    - name: "Preflight: load the package manager profile"
+      ansible.builtin.include_vars:
+        file: "{{ pkg_mgr_profile }}"
+        name: pkg_mgr_vars
+
+    - name: "Preflight: load the distro profile, if there is one"
+      ansible.builtin.include_vars:
+        file: "{{ distro_profile }}"
+        name: distro_vars
+      when: distro_profile is file
+
+    # An entry set to [] in a profile drops that package on that distro.
+    - name: "Preflight: work out the package list"
+      ansible.builtin.set_fact:
+        pkg_probe_cmd: "{{ pkg_mgr_vars.pkg_probe_cmd }}"
+        base_packages: >-
+          {{ (default_packages
+              | combine(pkg_mgr_vars.packages | default({}), (distro_vars | default({})).packages | default({})))
+             .values() | flatten | list }}
 
     # Resolves virtual names and provides the way a real install would,
     # which a plain "does this name exist" lookup doesn't. Needs no root.
     - name: "Preflight: check each base package is actually installable"
-      ansible.builtin.command: "{{ pkg_probe_cmd[ansible_facts['pkg_mgr']] }} {{ item }}"
+      ansible.builtin.command: "{{ pkg_probe_cmd }} {{ item }}"
       register: pkg_probe
       changed_when: false
       failed_when: false
@@ -110,9 +107,9 @@
         fail_msg: >-
           Not in this distro's repositories: {{ missing_packages | join(', ') }}.
           Nothing has been changed on this machine yet. Check whether this
-          distro calls them something else (`distro_packages` at the top of
-          this playbook), enable the repo that provides them, or drop them
-          and install them by hand. If the package index might just be
+          distro calls them something else and rename them in its profile
+          (ansible/profiles/), enable the repo that provides them, or set
+          them to [] there and install them by hand. If the package index might just be
           stale, refresh it first (apt update / pacman -Sy / dnf makecache).
         success_msg: "All {{ base_packages | length }} base packages are available."
     # --- End preflight -------------------------------------------------
