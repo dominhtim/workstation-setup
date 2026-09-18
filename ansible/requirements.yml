@@ -1,0 +1,6 @@
+---
+# community.general provides the pacman module that `package` hands off to on
+# Arch-based distros. 13.x needs ansible-core >= 2.18; see CLAUDE.md.
+collections:
+  - name: community.general
+    version: ">=13.0.0,<14.0.0"
