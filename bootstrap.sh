@@ -25,7 +25,7 @@ if [ ! -t 0 ]; then
 fi
 
 if ! command -v sudo >/dev/null 2>&1; then
-  die "sudo isn't installed. As root: 'apt install sudo && usermod -aG sudo $USER' (or the equivalent for your distro), then log out and back in and re-run this."
+  die "sudo isn't installed. As root, install it with this distro's package manager and add $USER to the admin group ('usermod -aG sudo $USER' on Debian/Ubuntu, 'usermod -aG wheel $USER' on Arch/Fedora), then log out and back in and re-run this."
 fi
 # Every probe below is -n or a pure group lookup: none of them can block
 # waiting on a password nobody is there to type.
@@ -34,7 +34,7 @@ if sudo -n -v 2>/dev/null; then
 elif id -nG "$USER" 2>/dev/null | grep -qwE 'sudo|wheel|admin'; then
   : # can sudo, will be asked for a password further down
 else
-  die "This user isn't in a sudo group ($USER), so nothing here can install anything. As root: 'usermod -aG sudo $USER', then log out and back in and re-run this. (If you have sudo rights through an explicit sudoers rule rather than group membership, this check is wrong — delete it and re-run.)"
+  die "This user isn't in a sudo group ($USER), so nothing here can install anything. As root: 'usermod -aG sudo $USER' (Debian/Ubuntu) or 'usermod -aG wheel $USER' (Arch/Fedora), then log out and back in and re-run this. (If you have sudo rights through an explicit sudoers rule rather than group membership, this check is wrong — delete it and re-run.)"
 fi
 
 # The venv doesn't exist yet, so this can't be an Ansible assert either.
@@ -79,6 +79,10 @@ if [ "$needs_install" -eq 1 ]; then
   fi
   "$VENV_DIR/bin/pip" install --quiet "ansible-core==${ANSIBLE_VERSION}"
 fi
+
+# Collections for package managers ansible-core has no module for (pacman).
+# A no-op once they're installed.
+"$VENV_DIR/bin/ansible-galaxy" collection install -r "$REPO_DIR/ansible/requirements.yml" >/dev/null
 
 ANSIBLE_PLAYBOOK="$VENV_DIR/bin/ansible-playbook"
 

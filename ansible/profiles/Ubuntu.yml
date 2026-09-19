@@ -1,0 +1,4 @@
+---
+# Ubuntu's docker-compose is a virtual name; Compose v2 is packaged under this.
+packages:
+  compose: docker-compose-v2

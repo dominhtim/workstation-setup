@@ -18,62 +18,100 @@
     project_repos:
       - git@github.com:dominhtim/TestProject.git
       - git@github.com:dominhtim/discord-bot.git
-    # Debian and Ubuntu package Compose v2 under different names, and
-    # neither distro has the other's.
-    compose_package: "{{ 'docker-compose' if ansible_facts['distribution'] == 'Debian' else 'docker-compose-v2' }}"
     # A hard floor, not a preference: the dotfiles' LSP config is 0.11-only.
     nvim_min_version: "0.11"
     # Pinned so machines provisioned months apart run the same editor.
     nvim_version: "v0.11.6"
     nvim_arch: "{{ 'x86_64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
-    # Used by both the preflight probe and the install task, so they can't drift.
-    base_packages:
-      - git
-      - zsh
-      - curl
-      - tmux
-      - neovim
-      - fzf
-      - ripgrep
-      - unzip
-      - xclip
-      - openssh-client
-      - nodejs
-      - npm
-      - build-essential
-      - docker.io
-      - "{{ compose_package }}"
-      - docker-buildx
-      - gh
+    # One entry per thing to install, under the name most distros use. A
+    # profile in profiles/ renames entries for its distro family; see CLAUDE.md.
+    default_packages:
+      git: git
+      zsh: zsh
+      curl: curl
+      tmux: tmux
+      neovim: neovim
+      fzf: fzf
+      ripgrep: ripgrep
+      unzip: unzip
+      xclip: xclip
+      wl_clipboard: wl-clipboard
+      nodejs: nodejs
+      npm: npm
+      toolchain: [gcc, make]
+      docker: docker
+      compose: docker-compose
+      buildx: docker-buildx
+      ssh_client: openssh
+      github_cli: gh
 
   tasks:
     # --- Preflight -----------------------------------------------------
     # Runs before anything mutates the machine. Earlier checks are in bootstrap.sh.
 
-    # A simulated install, not `apt-cache show`: it resolves virtual names
-    # and fails on anything apt couldn't really put on the disk. Needs no root.
+    # Package manager profile first (required), then an optional per-distro
+    # one; a later layer's names win.
+    - name: "Preflight: find the package profiles for this machine"
+      ansible.builtin.set_fact:
+        pkg_mgr_profile: "{{ playbook_dir }}/profiles/{{ ansible_facts['pkg_mgr'] }}.yml"
+        distro_profile: "{{ playbook_dir }}/profiles/{{ ansible_facts['distribution'] }}.yml"
+
+    - name: "Preflight: stop if there's no profile for this package manager"
+      ansible.builtin.assert:
+        that: pkg_mgr_profile is file
+        fail_msg: >-
+          This machine uses '{{ ansible_facts['pkg_mgr'] }}', and there's no
+          profiles/{{ ansible_facts['pkg_mgr'] }}.yml for it. Nothing has
+          been changed yet. Copy an existing profile in ansible/profiles/ to
+          that name, set its pkg_probe_cmd, and rename any packages this
+          distro calls something else.
+        quiet: true
+
+    - name: "Preflight: load the package manager profile"
+      ansible.builtin.include_vars:
+        file: "{{ pkg_mgr_profile }}"
+        name: pkg_mgr_vars
+
+    - name: "Preflight: load the distro profile, if there is one"
+      ansible.builtin.include_vars:
+        file: "{{ distro_profile }}"
+        name: distro_vars
+      when: distro_profile is file
+
+    # An entry set to [] in a profile drops that package on that distro.
+    - name: "Preflight: work out the package list"
+      ansible.builtin.set_fact:
+        pkg_probe_cmd: "{{ pkg_mgr_vars.pkg_probe_cmd }}"
+        base_packages: >-
+          {{ (default_packages
+              | combine(pkg_mgr_vars.packages | default({}), (distro_vars | default({})).packages | default({})))
+             .values() | flatten | list }}
+
+    # Resolves virtual names and provides the way a real install would,
+    # which a plain "does this name exist" lookup doesn't. Needs no root.
     - name: "Preflight: check each base package is actually installable"
-      ansible.builtin.command: "apt-get -s install {{ item }}"
+      ansible.builtin.command: "{{ pkg_probe_cmd }} {{ item }}"
       register: pkg_probe
       changed_when: false
       failed_when: false
       loop: "{{ base_packages }}"
-      when: ansible_facts['pkg_mgr'] == 'apt'
 
     - name: "Preflight: stop if any base package is unavailable"
       vars:
-        missing_packages: "{{ pkg_probe.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+        missing_packages: >-
+          {{ ((pkg_probe.results | selectattr('rc', 'ne', 0) | list)
+              + (pkg_probe.results | selectattr('stdout', 'equalto', '') | list))
+             | map(attribute='item') | unique | list }}
       ansible.builtin.assert:
         that: missing_packages | length == 0
         fail_msg: >-
-          Not in this distro's archives: {{ missing_packages | join(', ') }}.
+          Not in this distro's repositories: {{ missing_packages | join(', ') }}.
           Nothing has been changed on this machine yet. Check whether this
-          distro calls them something else, add the repo that provides
-          them, or drop them from `base_packages` at the top of this
-          playbook and install them by hand — and run `sudo apt update`
-          first if you think the package index is just stale.
+          distro calls them something else and rename them in its profile
+          (ansible/profiles/), enable the repo that provides them, or set
+          them to [] there and install them by hand. If the package index might just be
+          stale, refresh it first (apt update / pacman -Sy / dnf makecache).
         success_msg: "All {{ base_packages | length }} base packages are available."
-      when: ansible_facts['pkg_mgr'] == 'apt'
     # --- End preflight -------------------------------------------------
 
     - name: Ensure /etc/sudoers.d exists
@@ -104,8 +142,8 @@
       become: true
 
     # --- Neovim version floor --------------------------------------------
-    # Keep apt's nvim when it clears nvim_min_version, otherwise lay an
-    # upstream build over it on PATH. apt's copy is left installed.
+    # Keep the distro's nvim when it clears nvim_min_version, otherwise lay an
+    # upstream build over it on PATH. The distro's copy is left installed.
     - name: Check which Neovim is on PATH
       ansible.builtin.command: nvim --version
       register: nvim_version_check
@@ -160,12 +198,26 @@
               /usr/local/bin. If this machine had already opened nvim on the
               old version, run ':Lazy sync' once to rebuild the plugin state.
 
+    # Most docker packages create it, but not as a documented guarantee.
+    - name: Ensure the docker group exists
+      ansible.builtin.group:
+        name: docker
+        system: true
+      become: true
+
     - name: Add this user to the docker group (lets you run docker without sudo)
       ansible.builtin.user:
         name: "{{ ansible_facts['user_id'] }}"
         groups: docker
         append: true
       become: true
+
+    # Whether systemd is running, not merely installed: the service_mgr fact
+    # guesses from /sbin/init, which is wrong on Arch without it. See CLAUDE.md.
+    - name: Check whether systemd is the running init
+      ansible.builtin.stat:
+        path: /run/systemd/system
+      register: systemd_running
 
     # Skipped, not failed, without systemd — WSL without `systemd=true`
     # in /etc/wsl.conf is the case that turns up.
@@ -175,16 +227,16 @@
         enabled: true
         state: started
       become: true
-      when: ansible_facts['service_mgr'] == 'systemd'
+      when: systemd_running.stat.exists
 
     - name: Note that the docker service was left alone (no systemd on this machine)
       ansible.builtin.debug:
         msg: >-
-          Init system is '{{ ansible_facts['service_mgr'] }}', not systemd, so
-          docker wasn't enabled or started. Start it yourself
+          systemd isn't running on this machine, so docker wasn't enabled
+          or started. Start it yourself
           ('sudo service docker start'), or under WSL put 'systemd=true' in
           the [boot] section of /etc/wsl.conf and restart the distro.
-      when: ansible_facts['service_mgr'] != 'systemd'
+      when: not systemd_running.stat.exists
 
     # --- SSH key for GitHub ----------------------------------------------
     # Deliberately early: the key is printed within seconds, so it can be
@@ -286,24 +338,19 @@
         shell: /usr/bin/zsh
       become: true
 
-    - name: Check whether chezmoi is already installed
-      ansible.builtin.command: command -v chezmoi
-      register: chezmoi_check
-      failed_when: false
-      changed_when: false
-
     - name: Ensure ~/.local/bin exists
       ansible.builtin.file:
         path: "{{ ansible_facts['env']['HOME'] }}/.local/bin"
         state: directory
         mode: "0755"
 
+    # Always this copy, even if a distro package exists: every task below
+    # calls ~/.local/bin/chezmoi by path. get_url skips it once present.
     - name: Install chezmoi (downloads the plain binary straight from the GitHub release, no curl|sh installer script)
       ansible.builtin.get_url:
         url: "https://github.com/twpayne/chezmoi/releases/latest/download/chezmoi-linux-{{ chezmoi_arch }}"
         dest: "{{ ansible_facts['env']['HOME'] }}/.local/bin/chezmoi"
         mode: "0755"
-      when: chezmoi_check.rc != 0
 
     - name: Ensure ~/.config/chezmoi exists
       ansible.builtin.file:

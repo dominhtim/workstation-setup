@@ -3,6 +3,9 @@
 Ansible playbook that provisions a fresh Linux machine and applies
 [dotfiles](https://github.com/dominhtim/dotfiles) as its last step.
 
+Works on apt, pacman and dnf distros: Debian, Ubuntu, Arch and its
+derivatives (CachyOS, EndeavourOS, Manjaro), and Fedora.
+
 This is the "set up a brand new box" half: packages, zsh, docker, an SSH key
 for GitHub, chezmoi. The dotfiles themselves — zsh, git, tmux and Neovim
 config — live in that separate repo and know nothing about this one.
@@ -33,15 +36,18 @@ Before Ansible can run at all (`bootstrap.sh`):
 
 - **A real terminal.** Don't pipe, redirect or background it — `visudo` and
   the SSH-key checkpoint both need to prompt.
-- **`sudo` installed, and your user in a sudo group.** A default Debian
+- **`sudo` installed, and your user in `sudo` or `wheel`.** A default Debian
   install with a root password set has neither.
-- **Python >= 3.12**, the floor for the pinned `ansible-core` 2.21. Debian 13
-  and Ubuntu 24.04+ are fine; Debian 12 and Ubuntu 22.04 are not.
+- **Python >= 3.12**, the floor for the pinned `ansible-core` 2.21. Debian 13,
+  Ubuntu 24.04+, Arch and current Fedora are fine; Debian 12 and Ubuntu
+  22.04 are not.
 
 Before the machine is touched (`ansible/playbook.yml`):
 
-- **Every base package resolves in the archives.** Anything missing is named
-  up front, before the first change is made.
+- **A profile for this package manager** — apt, pacman and dnf ship with
+  one. Anything else stops with a message naming the file to add.
+- **Every base package resolves in the distro's repositories.** Anything
+  missing is named up front, before the first change is made.
 - **systemd is running.** Where it isn't — typically WSL without
   `systemd=true` in `/etc/wsl.conf` — enabling the docker service is skipped
   with a note instead of failing the run.
@@ -49,8 +55,9 @@ Before the machine is touched (`ansible/playbook.yml`):
 ## What it does
 
 1. Installs base packages: git, zsh, curl, tmux, neovim, fzf, ripgrep, unzip,
-   xclip, openssh-client, nodejs, npm, build-essential, docker.io, Compose v2,
-   docker-buildx, gh
+   xclip, wl-clipboard, nodejs, npm, a C toolchain, Docker with Compose v2
+   and buildx, the OpenSSH client, and gh — each under whatever name the
+   distro uses (see [Other distros](#other-distros))
 2. Installs an upstream Neovim into `/opt` and links it into `/usr/local/bin`
    when the distro's is older than 0.11, which the dotfiles' LSP config needs
 3. Adds you to the `docker` group, enables and starts the docker service
@@ -62,6 +69,26 @@ Before the machine is touched (`ansible/playbook.yml`):
 8. Pauses — only if the dotfiles aren't cloned yet — for the SSH key
 9. Clones and applies the dotfiles repo over SSH
 10. Clones your project repos into `~/projects` (first run only)
+
+## Other distros
+
+The distro is detected automatically. Package names that differ between
+distros live in `ansible/profiles/`, and each file holds only the
+differences — `pacman.yml` is two lines:
+
+```yaml
+packages:
+  toolchain: base-devel
+  github_cli: github-cli
+```
+
+Derivatives (CachyOS, EndeavourOS, Manjaro, Mint, Pop!_OS, …) use their
+package manager's profile and need nothing extra. For a distro with a
+package manager that has no profile yet, the playbook stops before changing
+anything and names the file to create: copy an existing profile, set
+`pkg_probe_cmd`, and rename whatever the preflight reports as missing. A
+single distro that disagrees with its family gets its own small override
+file, named as Ansible reports it (`Ubuntu.yml`).
 
 ## Configuration
 
@@ -133,15 +160,19 @@ than letting `chezmoi apply` hit a prompt it has no terminal for. Keep the
 edit with `chezmoi add <file>` (then commit it in the dotfiles repo), or
 discard it with `chezmoi apply --force <file>`.
 
-**A base package isn't in the archives** — the preflight names it before
-anything is changed. Run `sudo apt update` in case the index is stale;
-otherwise find the name this distro uses, or drop it from `base_packages`.
+**A base package isn't in the repositories** — the preflight names it before
+anything is changed. Refresh the package index in case it's stale
+(`sudo apt update`, `sudo pacman -Syu`, `sudo dnf makecache`); otherwise
+find the name this distro uses and set it in its profile under
+`ansible/profiles/`.
+
+**No profile for this package manager** — see [Other distros](#other-distros).
 
 **Neovim was replaced and plugins misbehave** — run `:Lazy sync` once.
 
 ## Notes
 
 `bootstrap.sh` pins `ansible-core` in a dedicated venv rather than using the
-distro's. Docker comes from the distro's own `docker.io` packages rather
-than Docker's third-party apt repo. Rationale for these and other design
+distro's. Docker comes from each distro's own packages rather than Docker's
+third-party repos. Rationale for these and other design
 decisions is in [CLAUDE.md](CLAUDE.md).

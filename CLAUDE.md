@@ -26,6 +26,9 @@ documentation of what the code currently does.
   off. Deliberately thin; provisioning logic goes in the playbook.
 - `ansible/playbook.yml` — everything the machine actually gets.
 - `ansible/templates/chezmoi.toml.j2` — pre-seeds chezmoi's identity data.
+- `ansible/profiles/` — per-distro package names, picked automatically.
+- `ansible/requirements.yml` — collections beyond `ansible-core`, installed
+  by `bootstrap.sh`.
 
 Dotfiles themselves live in [dominhtim/dotfiles](https://github.com/dominhtim/dotfiles).
 That repo doesn't know this one exists; this one applies it as its last step.
@@ -60,6 +63,10 @@ automatically on a version mismatch, so that costs nothing but a re-run.
 for the pin" rather than a wall of pip resolver output. 2.21 needs >= 3.12;
 2.17 needed only >= 3.10. Keep it in step with `ANSIBLE_VERSION`.
 
+`ansible/requirements.yml` pins `community.general` to 13.x, which needs
+`ansible-core` >= 2.18. Falling back to 2.17 means dropping that pin to
+12.x as well.
+
 ## Why `Defaults use_pty` is handled in bash, not Ansible
 
 It forces every sudo call to have a real terminal attached — a deliberate
@@ -83,10 +90,61 @@ Related: every sudo probe in the preflight is either `-n` or a pure group
 lookup. A check that can block on a password nobody is there to type is the
 exact failure this repo already spent a debugging session on.
 
+## Supporting more than one distro family
+
+No tool can work out that Docker is `docker.io` on Debian and
+`moby-engine` on Fedora, so that mapping has to be written down. It lives in
+`ansible/profiles/`, layered so each file holds only what differs:
+
+1. `default_packages` in the playbook: one entry per thing to install
+   (`docker`, `toolchain`, `ssh_client`, …) under the name most distros use.
+2. `profiles/<pkg_mgr>.yml` (required): renames for that family, plus the
+   family's `pkg_probe_cmd`.
+3. `profiles/<distribution>.yml` (optional): renames for one distro that
+   disagrees with its family — `Ubuntu.yml` exists only for Compose v2.
+
+Later layers win, per entry (`combine`). A value can be a list (dnf's
+toolchain is three packages) or `[]` to drop that entry on that distro.
+
+The required layer is keyed on `ansible_facts['pkg_mgr']`, not
+`distribution` or `os_family`: Ansible reports derivatives inconsistently
+(CachyOS isn't in its Arch family list), but the package manager is
+detected from the binary on disk. So derivatives — CachyOS, EndeavourOS,
+Mint, Pop!_OS — need no file of their own. Fedora reports `dnf5`, hence the
+`dnf5.yml` symlink. An unknown package manager stops at the first preflight
+assert, naming the file to create.
+
+`ansible.builtin.package` hands off to a per-manager module. apt and dnf
+ship in `ansible-core`; pacman lives in `community.general`, which is why
+`bootstrap.sh` installs collections at all. Without it the install task
+dies with a module-not-found error before looking at a single name.
+
+Docker's package name differs on every family (`docker.io`, `docker`,
+`moby-engine`), so the playbook creates the `docker` group itself rather
+than relying on each package's install scripts to.
+
+chezmoi is always downloaded to `~/.local/bin`, even when a distro package
+exists, because every later task calls it by that path. The old
+`command -v chezmoi` check was also wrong on its own terms: `command` is a
+shell builtin, and `ansible.builtin.command` runs it only where the distro
+happens to ship a `/usr/bin/command` wrapper (Fedora does, Ubuntu doesn't).
+
+`Defaults use_pty` is a caveat on newer systems: sudo >= 1.9.14 enables it
+by default with no line in `/etc/sudoers`, so `bootstrap.sh`'s grep has
+nothing to find. The NOPASSWD path is unaffected in testing; the
+password-prompt path on a fresh Arch or Fedora box is unverified.
+
 ## Why the package preflight simulates an install
 
 `package` fails as a single unit: one missing name takes the whole install
-task down, and apt's error doesn't make it obvious which name was at fault.
+task down, and the package manager's error doesn't make it obvious which
+name was at fault.
+
+Each profile's `pkg_probe_cmd` is a non-root probe that resolves the name
+the way a real install would: `apt-get -s install`, `pacman -Sp`, and
+`dnf repoquery --whatprovides`. A missing name shows up as a non-zero exit
+or as empty output — dnf exits 0 with nothing printed, so exit code alone
+isn't enough.
 
 `apt-get -s install` is used rather than `apt-cache show` because `show`
 exits 0 for a purely virtual name with no installation candidate — on
@@ -97,23 +155,23 @@ no root.
 
 Package names are less portable across Debian and Ubuntu than they look:
 Debian 13 has `docker-compose` 2.26 (its v1 python package is long gone),
-Ubuntu has `docker-compose-v2` and no `docker-compose` at all. Hence
-`compose_package`.
+Ubuntu has `docker-compose-v2` and only a virtual `docker-compose`. Hence
+`profiles/Ubuntu.yml`.
 
 ## Why Neovim has a version floor
 
-A distro archive is only ever as new as the distro: Ubuntu 26.04 ships
-0.11.6, Debian 13 is still on 0.10.x. The shared dotfiles' nvim config calls
-`vim.lsp.config()` / `vim.lsp.enable()` (both landed in 0.11), and
-mason-lspconfig v2 calls `vim.lsp.enable()` itself — so on an older Neovim
-the entire LSP layer dies at startup with `attempt to call field 'config'
+A distro archive is only ever as new as the distro: Ubuntu 26.04 and
+Fedora 44 ship 0.11.6, Arch 0.12, Debian 13 is still on 0.10.x. The shared
+dotfiles' nvim config calls `vim.lsp.config()` / `vim.lsp.enable()` (both
+landed in 0.11), and mason-lspconfig v2 calls `vim.lsp.enable()` itself —
+so on an older Neovim the entire LSP layer dies at startup with `attempt to call field 'config'
 (a nil value)`. A box with the older one isn't merely behind; it throws
 three errors before you get a prompt.
 
-apt's copy is left installed on purpose. It still owns the vi/vim
+The distro's copy is left installed on purpose. It still owns the vi/vim
 alternatives, costs nothing, and `/usr/local/bin` precedes `/usr/bin` on
-both distros — so the symlink simply wins on PATH, and undoing the whole
-thing is one `rm /usr/local/bin/nvim` away.
+every supported distro — so the symlink simply wins on PATH, and undoing
+the whole thing is one `rm /usr/local/bin/nvim` away.
 
 No checksum is verified on the tarball (or the chezmoi binary): upstream
 publishes no shasum asset for either. HTTPS to GitHub's release CDN is the
@@ -178,7 +236,10 @@ non-blank character in column 1 for exactly this case; column 2 is just
   is there because pinning them to a frozen commit would be wrong, not safer.
 - oh-my-zsh and its plugins deliberately track upstream tip. It's a rolling
   theme/plugin install, not something with a release to pin to.
-- The docker service task is skipped rather than failed where there's no
+- The docker service task is skipped rather than failed where systemd
+  isn't running. That is detected from `/run/systemd/system` (what
+  `sd_booted()` checks), not the `service_mgr` fact, which guesses from
+  `/sbin/init` and says `systemd` on Arch whenever it's merely installed. No
   systemd — Debian/Ubuntu under WSL without `systemd=true` in `/etc/wsl.conf`
   is the case that actually turns up.
 - `.gitignore` covers `ansible/~*` because Ansible occasionally creates a

@@ -1,0 +1,8 @@
+---
+# Debian, Ubuntu and derivatives. Only names that differ from the playbook's
+# default_packages go here.
+pkg_probe_cmd: apt-get -s install
+packages:
+  toolchain: build-essential
+  docker: docker.io
+  ssh_client: openssh-client

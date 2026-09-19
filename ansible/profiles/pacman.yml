@@ -1,0 +1,6 @@
+---
+# Arch, CachyOS, EndeavourOS, Manjaro and other Arch derivatives.
+pkg_probe_cmd: pacman -Sp --print-format %n
+packages:
+  toolchain: base-devel
+  github_cli: github-cli
