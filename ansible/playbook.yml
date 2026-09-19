@@ -2,7 +2,7 @@
 # Provisions a machine, then applies github.com/dominhtim/dotfiles via chezmoi.
 # Run with: ansible-playbook -K ansible/playbook.yml   (or ../bootstrap.sh)
 
-- name: Bootstrap dev workstation (packages, zsh, chezmoi-managed dotfiles)
+- name: Bootstrap dev workstation (packages, shell, chezmoi-managed dotfiles)
   hosts: localhost
   connection: local
   gather_facts: true
@@ -14,6 +14,9 @@
     dotfiles_repo: "dominhtim/dotfiles"
     chezmoi_arch: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
     projects_dir: "{{ ansible_facts['env']['HOME'] }}/projects"
+    # zsh or fish. Only that shell and its setup are installed; the dotfiles
+    # skip the other one's files too. See CLAUDE.md.
+    login_shell: fish
     # Cloned once into ~/projects, never updated after that.
     project_repos:
       - git@github.com:dominhtim/TestProject.git
@@ -27,7 +30,7 @@
     # profile in profiles/ renames entries for its distro family; see CLAUDE.md.
     default_packages:
       git: git
-      zsh: zsh
+      shell: "{{ login_shell }}"
       curl: curl
       tmux: tmux
       neovim: neovim
@@ -48,6 +51,12 @@
   tasks:
     # --- Preflight -----------------------------------------------------
     # Runs before anything mutates the machine. Earlier checks are in bootstrap.sh.
+
+    - name: "Preflight: stop if login_shell isn't one this playbook sets up"
+      ansible.builtin.assert:
+        that: login_shell in ['zsh', 'fish']
+        fail_msg: "login_shell is '{{ login_shell }}'; it has to be 'zsh' or 'fish'."
+        quiet: true
 
     # Package manager profile first (required), then an optional per-distro
     # one; a later layer's names win.
@@ -295,48 +304,56 @@
           - "{{ github_pubkey.content | b64decode }}"
           - "The rest of the setup runs while you do that — there's a checkpoint before the dotfiles clone if you need more time."
 
-    - name: Check whether oh-my-zsh is already installed
-      ansible.builtin.stat:
-        path: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh"
-      register: omz_dir
+    - name: Set up oh-my-zsh, powerlevel10k and the zsh plugins
+      when: login_shell == 'zsh'
+      block:
+        - name: Check whether oh-my-zsh is already installed
+          ansible.builtin.stat:
+            path: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh"
+          register: omz_dir
 
-    - name: Clone oh-my-zsh
-      ansible.builtin.git:
-        repo: https://github.com/ohmyzsh/ohmyzsh.git
-        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh"
-        version: master   # rolling, intentionally unpinned
-        depth: 1
-      when: not omz_dir.stat.exists
+        - name: Clone oh-my-zsh
+          ansible.builtin.git:
+            repo: https://github.com/ohmyzsh/ohmyzsh.git
+            dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh"
+            version: master   # rolling, intentionally unpinned
+            depth: 1
+          when: not omz_dir.stat.exists
 
-    - name: Clone/update powerlevel10k theme
-      ansible.builtin.git:
-        repo: https://github.com/romkatv/powerlevel10k.git
-        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/themes/powerlevel10k"
-        version: master
-        depth: 1
-        update: true
+        - name: Clone/update powerlevel10k theme
+          ansible.builtin.git:
+            repo: https://github.com/romkatv/powerlevel10k.git
+            dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/themes/powerlevel10k"
+            version: master
+            depth: 1
+            update: true
 
-    - name: Clone/update zsh-autosuggestions plugin
-      ansible.builtin.git:
-        repo: https://github.com/zsh-users/zsh-autosuggestions.git
-        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/plugins/zsh-autosuggestions"
-        version: master
-        depth: 1
-        update: true
+        - name: Clone/update zsh-autosuggestions plugin
+          ansible.builtin.git:
+            repo: https://github.com/zsh-users/zsh-autosuggestions.git
+            dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/plugins/zsh-autosuggestions"
+            version: master
+            depth: 1
+            update: true
 
-    - name: Clone/update zsh-syntax-highlighting plugin
-      ansible.builtin.git:
-        repo: https://github.com/zsh-users/zsh-syntax-highlighting.git
-        dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting"
-        version: master
-        depth: 1
-        update: true
+        - name: Clone/update zsh-syntax-highlighting plugin
+          ansible.builtin.git:
+            repo: https://github.com/zsh-users/zsh-syntax-highlighting.git
+            dest: "{{ ansible_facts['env']['HOME'] }}/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting"
+            version: master
+            depth: 1
+            update: true
 
-    - name: Set zsh as the default shell
+    - name: Set the login shell
       ansible.builtin.user:
         name: "{{ ansible_facts['user_id'] }}"
-        shell: /usr/bin/zsh
+        shell: "/usr/bin/{{ login_shell }}"
       become: true
+
+    # A fact, not a play var, so the summary play below can still see it.
+    - name: Remember the login shell for the summary
+      ansible.builtin.set_fact:
+        chosen_shell: "{{ login_shell }}"
 
     - name: Ensure ~/.local/bin exists
       ansible.builtin.file:
@@ -466,9 +483,16 @@
         update: false
       loop: "{{ project_repos }}"
 
-    - name: Ensure ~/.zshrc.local exists (untracked, machine-only escape hatch)
+    - name: Ensure ~/.config/fish exists
       ansible.builtin.file:
-        path: "{{ ansible_facts['env']['HOME'] }}/.zshrc.local"
+        path: "{{ ansible_facts['env']['HOME'] }}/.config/fish"
+        state: directory
+        mode: "0755"
+      when: login_shell == 'fish'
+
+    - name: Ensure the shell's local-overrides file exists (untracked, machine-only escape hatch)
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/{{ '.zshrc.local' if login_shell == 'zsh' else '.config/fish/local.fish' }}"
         state: touch
         mode: "0644"
         access_time: preserve
@@ -484,7 +508,7 @@
         msg:
           - "Done."
           - "Next steps:"
-          - "  1. Log out and back in — needed for the docker group to take effect (you'll get 'permission denied' on the docker socket until you do) and for the shell change to fully take. 'exec zsh' reloads the shell alone, but won't pick up the new group."
-          - "  2. Run 'p10k configure' to set up the prompt"
+          - "  1. Log out and back in — needed for the docker group to take effect (you'll get 'permission denied' on the docker socket until you do) and for the shell change to fully take. 'exec {{ chosen_shell }}' reloads the shell alone, but won't pick up the new group."
+          - "  2. {{ \"Run 'p10k configure' to set up the prompt\" if chosen_shell == 'zsh' else \"Optional: 'fish_config prompt show' previews fish's built-in prompts, 'fish_config prompt save <name>' keeps one\" }}"
           - "  3. Open nvim once to let lazy.nvim install all plugins automatically"
-          - "  4. To edit a dotfile going forward: 'chezmoi edit ~/.zshrc' then 'chezmoi apply'"
+          - "  4. To edit a dotfile going forward: 'chezmoi edit {{ '~/.zshrc' if chosen_shell == 'zsh' else '~/.config/fish/config.fish' }}' then 'chezmoi apply'"
