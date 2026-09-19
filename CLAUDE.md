@@ -164,9 +164,9 @@ A distro archive is only ever as new as the distro: Ubuntu 26.04 and
 Fedora 44 ship 0.11.6, Arch 0.12, Debian 13 is still on 0.10.x. The shared
 dotfiles' nvim config calls `vim.lsp.config()` / `vim.lsp.enable()` (both
 landed in 0.11), and mason-lspconfig v2 calls `vim.lsp.enable()` itself —
-so on an older Neovim the entire LSP layer dies at startup with `attempt to call field 'config'
-(a nil value)`. A box with the older one isn't merely behind; it throws
-three errors before you get a prompt.
+so on an older Neovim the entire LSP layer dies at startup with
+`attempt to call field 'config' (a nil value)`. A box with the older one
+isn't merely behind; it throws three errors before you get a prompt.
 
 The distro's copy is left installed on purpose. It still owns the vi/vim
 alternatives, costs nothing, and `/usr/local/bin` precedes `/usr/bin` on
@@ -228,6 +228,31 @@ new TTY: open /dev/tty: no such device or address`, which names the file
 only in passing and says nothing about what to do. `chezmoi status` puts a
 non-blank character in column 1 for exactly this case; column 2 is just
 "differs from target", which is every file waiting to be applied.
+
+## Why only one shell is set up
+
+`login_shell` picks zsh or fish, and only that one is installed: the
+`shell` entry in `default_packages` is the shell's own name, which is the
+package name on every supported distro. The oh-my-zsh, powerlevel10k and
+plugin clones are skipped under fish, which has autosuggestions and syntax
+highlighting built in.
+
+The choice also reaches the dotfiles: `chezmoi.toml.j2` writes it as
+`shell` in chezmoi's data, and the dotfiles' `.chezmoiignore` skips the
+other shell's files. So a fish machine gets no `.zshrc` it can't use. The
+dotfiles' `.chezmoi.toml.tmpl` carries `shell` through, because the first
+`chezmoi init` regenerates the config from it and would otherwise drop the
+seeded value.
+
+Switching is a re-run with the other value. The old shell's package and
+files are left in place — removing a login shell out from under a running
+session is the risky direction, and nothing breaks by keeping them.
+
+CachyOS creates `~/.config/fish/config.fish` for new users (sourcing its
+`cachyos-fish-config`). chezmoi never wrote that file, so `chezmoi status`
+leaves column 1 blank and the hand-edit check lets it through; `apply`
+replaces it without a prompt. That is deliberate — the same config on every
+distro — at the cost of CachyOS's own fish extras.
 
 ## Odds and ends
 

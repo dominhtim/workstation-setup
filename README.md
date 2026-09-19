@@ -6,9 +6,10 @@ Ansible playbook that provisions a fresh Linux machine and applies
 Works on apt, pacman and dnf distros: Debian, Ubuntu, Arch and its
 derivatives (CachyOS, EndeavourOS, Manjaro), and Fedora.
 
-This is the "set up a brand new box" half: packages, zsh, docker, an SSH key
-for GitHub, chezmoi. The dotfiles themselves — zsh, git, tmux and Neovim
-config — live in that separate repo and know nothing about this one.
+This is the "set up a brand new box" half: packages, a shell (fish or zsh),
+docker, an SSH key for GitHub, chezmoi. The dotfiles themselves — shell,
+git, tmux and Neovim config — live in that separate repo and know nothing
+about this one.
 
 ## Quick start
 
@@ -22,7 +23,7 @@ You'll be asked for your sudo password once, and for your git name/email
 once. Everything else is unattended, apart from pasting an SSH key into
 GitHub partway through (see [GitHub SSH access](#github-ssh-access)).
 
-Safe to re-run any time. Packages, oh-my-zsh and chezmoi are only touched
+Safe to re-run any time. Packages, the shell setup and chezmoi are only touched
 when missing; the dotfiles step pulls and applies whatever is new in the
 dotfiles repo. Re-running after pushing a dotfiles change is a legitimate
 way to sync a machine, not just a first-time step.
@@ -54,18 +55,19 @@ Before the machine is touched (`ansible/playbook.yml`):
 
 ## What it does
 
-1. Installs base packages: git, zsh, curl, tmux, neovim, fzf, ripgrep, unzip,
-   xclip, wl-clipboard, nodejs, npm, a C toolchain, Docker with Compose v2
-   and buildx, the OpenSSH client, and gh — each under whatever name the
-   distro uses (see [Other distros](#other-distros))
+1. Installs base packages: git, the chosen shell, curl, tmux, neovim, fzf,
+   ripgrep, unzip, xclip, wl-clipboard, nodejs, npm, a C toolchain, Docker
+   with Compose v2 and buildx, the OpenSSH client, and gh — each under
+   whatever name the distro uses (see [Other distros](#other-distros))
 2. Installs an upstream Neovim into `/opt` and links it into `/usr/local/bin`
    when the distro's is older than 0.11, which the dotfiles' LSP config needs
 3. Adds you to the `docker` group, enables and starts the docker service
 4. Generates `~/.ssh/id_ed25519` if absent and prints the public key
    immediately, so it can be added to GitHub while the slower steps run
-5. Clones oh-my-zsh, powerlevel10k, zsh-autosuggestions, zsh-syntax-highlighting
-6. Sets zsh as the default shell
-7. Installs chezmoi and seeds its config with your git identity
+5. For zsh only: clones oh-my-zsh, powerlevel10k, zsh-autosuggestions and
+   zsh-syntax-highlighting (fish has autosuggestions and highlighting built in)
+6. Sets the chosen shell (`login_shell`) as the login shell
+7. Installs chezmoi and seeds its config with your git identity and shell
 8. Pauses — only if the dotfiles aren't cloned yet — for the SSH key
 9. Clones and applies the dotfiles repo over SSH
 10. Clones your project repos into `~/projects` (first run only)
@@ -92,7 +94,17 @@ file, named as Ansible reports it (`Ubuntu.yml`).
 
 ## Configuration
 
-Both live in `vars:` at the top of `ansible/playbook.yml`.
+All of these live in `vars:` at the top of `ansible/playbook.yml`.
+
+**Which shell:**
+
+```yaml
+login_shell: fish   # or zsh
+```
+
+Only the chosen shell and its setup are installed, and chezmoi applies only
+that shell's dotfiles. To switch, change it and re-run `./bootstrap.sh`; the
+previous shell is left installed, not removed.
 
 **Which dotfiles repo gets applied:**
 
@@ -126,7 +138,7 @@ The playbook generates an SSH key if you don't have one and prints the
 public key right after packages install, well before the clone that needs
 it — so you can add it at
 [github.com/settings/keys](https://github.com/settings/keys) while
-oh-my-zsh, the plugin clones and the chezmoi download run.
+the remaining installs and the chezmoi download run.
 
 If that isn't enough time, the playbook pauses again immediately before the
 clone and waits for Enter. Both the key generation and that pause are
@@ -143,10 +155,13 @@ browser session for it.
    only apply to a new login session. Until then `docker ps` still needs
    `sudo` — that's expected, not a bug. (`newgrp docker` works for the
    current shell if you'd rather not log out.)
-2. `p10k configure` to set up the prompt.
+2. Optionally pick a prompt: under fish, `fish_config prompt show` previews
+   the built-in ones and `fish_config prompt save <name>` keeps one; under
+   zsh, `p10k configure`.
 3. Open `nvim` once and let lazy.nvim install the plugins.
 
-To edit a dotfile from then on: `chezmoi edit ~/.zshrc`, then `chezmoi apply`.
+To edit a dotfile from then on: `chezmoi edit ~/.config/fish/config.fish`
+(or `~/.zshrc`), then `chezmoi apply`.
 
 ## Troubleshooting
 
